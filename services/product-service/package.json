@@ -1,0 +1,22 @@
+﻿{
+  "name": "product-service",
+  "version": "1.0.0",
+  "description": "product-service for event-driven e-commerce system",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "seed": "node src/seed.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "dotenv": "^16.4.5",
+    "mongoose": "^8.5.1",
+    "amqplib": "^2.0.1",
+    "pg": "^8.12.0",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}

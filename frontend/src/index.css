@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 20 14% 12%;
+  --card: 0 0% 100%;
+  --card-foreground: 20 14% 12%;
+  --primary: 24 90% 55%;
+  --primary-foreground: 0 0% 100%;
+  --muted: 20 10% 95%;
+  --muted-foreground: 20 8% 45%;
+  --border: 20 10% 88%;
+  --input: 20 10% 88%;
+}
+
+.dark {
+  --background: 20 14% 8%;
+  --foreground: 20 10% 95%;
+  --card: 20 14% 11%;
+  --card-foreground: 20 10% 95%;
+  --primary: 24 90% 58%;
+  --primary-foreground: 20 14% 8%;
+  --muted: 20 10% 16%;
+  --muted-foreground: 20 8% 65%;
+  --border: 20 10% 20%;
+  --input: 20 10% 20%;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
