@@ -1,6 +1,5 @@
 const pool = require('./db');
 
-// Simple idempotent migration: creates the orders table if it doesn't exist yet.
 async function runMigrations() {
   const createOrdersTable = `
     CREATE TABLE IF NOT EXISTS orders (
@@ -10,15 +9,23 @@ async function runMigrations() {
       total NUMERIC(10, 2) NOT NULL CHECK (total >= 0),
       status VARCHAR(20) NOT NULL DEFAULT 'PENDING'
         CHECK (status IN ('PENDING', 'CONFIRMED', 'CANCELLED')),
+      cancellation_reason TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `;
+
+  // Safe to run every startup, on a fresh table or an existing one -
+  // this is what actually adds the column to your already-running database.
+  const addCancellationReasonColumn = `
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
   `;
 
   let retries = 10;
   while (retries > 0) {
     try {
       await pool.query(createOrdersTable);
+      await pool.query(addCancellationReasonColumn);
       console.log('[order-service] Migration check complete: orders table ready');
       return;
     } catch (err) {

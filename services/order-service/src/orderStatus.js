@@ -1,13 +1,11 @@
 const pool = require('./db');
 
-// Updates an order's status. Used by the payment-result event consumer -
-// this is what actually completes the saga on the Order Service side.
-async function updateOrderStatus(orderId, newStatus) {
+async function updateOrderStatus(orderId, newStatus, reason = null) {
   const result = await pool.query(
-    `UPDATE orders SET status = $1, updated_at = NOW()
-     WHERE id = $2
-     RETURNING id, status`,
-    [newStatus, orderId]
+    `UPDATE orders SET status = $1, cancellation_reason = $2, updated_at = NOW()
+     WHERE id = $3
+     RETURNING id, status, cancellation_reason`,
+    [newStatus, reason, orderId]
   );
 
   if (result.rows.length === 0) {

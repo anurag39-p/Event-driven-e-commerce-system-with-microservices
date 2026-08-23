@@ -50,7 +50,7 @@ export default function Navbar() {
               {CATEGORIES.map((cat) => (
                 <Link
                   key={cat.slug}
-                  to={`/products?category=${cat.slug}`}
+                  to={`/?category=${cat.slug}`}
                   className="hover:text-[hsl(var(--foreground))] transition-colors"
                 >
                   {cat.label}
@@ -166,7 +166,7 @@ export default function Navbar() {
               {CATEGORIES.map((cat) => (
                 <Link
                   key={cat.slug}
-                  to={`/products?category=${cat.slug}`}
+                  to={`/?category=${cat.slug}`}
                   onClick={() => setMobileMenuOpen(false)}
                   className="py-2.5 text-sm border-b border-[hsl(var(--border))]"
                 >

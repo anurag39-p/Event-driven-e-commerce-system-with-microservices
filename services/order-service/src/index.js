@@ -1,4 +1,4 @@
-﻿require('dotenv').config();
+require('dotenv').config();
 const express = require('express');
 const pool = require('./db');
 const { runMigrations } = require('./migrate');
@@ -50,11 +50,11 @@ app.post('/admin/dlq/replay', async (req, res) => {
 });
 
 async function handlePaymentResult(routingKey, payload) {
-  const { orderId } = payload;
+  const { orderId, reason } = payload;
   if (routingKey === 'payment.succeeded') {
     await updateOrderStatus(orderId, 'CONFIRMED');
   } else if (routingKey === 'payment.failed') {
-    await updateOrderStatus(orderId, 'CANCELLED');
+    await updateOrderStatus(orderId, 'CANCELLED', reason);
   } else {
     throw new Error(`Unrecognized routing key: ${routingKey}`);
   }

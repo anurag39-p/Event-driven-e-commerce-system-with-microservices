@@ -1,11 +1,25 @@
-import { createContext, useContext, useReducer, useEffect } from 'react';
+import { createContext, useContext, useReducer, useEffect, useLayoutEffect, useRef } from 'react';
+import { useAuth } from './AuthContext.jsx';
 
 const CartContext = createContext(null);
-const CART_STORAGE_KEY = 'cart';
+const LEGACY_CART_KEY = 'cart';
 
-function getInitialItems() {
+function getUserCartKey(userId) {
+  return `cart:${userId}`;
+}
+
+function loadCartForUser(userId) {
+  const legacyRaw = localStorage.getItem(LEGACY_CART_KEY);
+  if (legacyRaw !== null) {
+    const userKey = getUserCartKey(userId);
+    if (localStorage.getItem(userKey) === null) {
+      localStorage.setItem(userKey, legacyRaw);
+    }
+    localStorage.removeItem(LEGACY_CART_KEY);
+  }
+
   try {
-    const stored = localStorage.getItem(CART_STORAGE_KEY);
+    const stored = localStorage.getItem(getUserCartKey(userId));
     return stored ? JSON.parse(stored) : [];
   } catch {
     return [];
@@ -14,6 +28,9 @@ function getInitialItems() {
 
 function cartReducer(state, action) {
   switch (action.type) {
+    case 'LOAD_CART':
+      return action.payload;
+
     case 'ADD_TO_CART': {
       const { product, quantity = 1 } = action.payload;
       const existing = state.find((item) => item.productId === product._id);
@@ -60,11 +77,37 @@ function cartReducer(state, action) {
 }
 
 export function CartProvider({ children }) {
-  const [items, dispatch] = useReducer(cartReducer, undefined, getInitialItems);
+  const { user, isLoading: authLoading } = useAuth();
+  const [items, dispatch] = useReducer(cartReducer, []);
+
+  const loadedUserIdRef = useRef(undefined);
+
+  useLayoutEffect(() => {
+    if (authLoading) return;
+
+    const currentUserId = user?.id ?? null;
+
+    if (loadedUserIdRef.current === currentUserId) {
+      return;
+    }
+
+    if (currentUserId === null) {
+      dispatch({ type: 'LOAD_CART', payload: [] });
+    } else {
+      dispatch({ type: 'LOAD_CART', payload: loadCartForUser(currentUserId) });
+    }
+
+    loadedUserIdRef.current = currentUserId;
+  }, [user, authLoading]);
 
   useEffect(() => {
-    localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(items));
-  }, [items]);
+    if (authLoading) return;
+    const currentUserId = user?.id ?? null;
+    if (currentUserId === null) return;
+    if (loadedUserIdRef.current !== currentUserId) return;
+
+    localStorage.setItem(getUserCartKey(currentUserId), JSON.stringify(items));
+  }, [items, user, authLoading]);
 
   function addToCart(product, quantity = 1) {
     dispatch({ type: 'ADD_TO_CART', payload: { product, quantity } });

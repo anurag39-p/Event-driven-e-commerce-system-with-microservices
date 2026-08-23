@@ -4,10 +4,6 @@ const { publishEvent } = require('./rabbit');
 
 const router = express.Router();
 
-// Resolves which user this request belongs to.
-// In normal use, the Gateway already verified the JWT and attached x-user-id.
-// The req.body.userId fallback exists only for testing this service directly
-// (bypassing the Gateway) during development.
 function resolveUserId(req) {
   if (req.headers['x-user-id']) {
     return parseInt(req.headers['x-user-id'], 10);
@@ -32,7 +28,6 @@ function calculateTotal(items) {
   return items.reduce((sum, item) => sum + item.price * item.quantity, 0);
 }
 
-// POST /orders - create a new order with status PENDING
 router.post('/', async (req, res) => {
   const userId = resolveUserId(req);
   const { items } = req.body;
@@ -52,15 +47,12 @@ router.post('/', async (req, res) => {
     const result = await pool.query(
       `INSERT INTO orders (user_id, items, total, status)
        VALUES ($1, $2, $3, 'PENDING')
-       RETURNING id, user_id, items, total, status, created_at, updated_at`,
+       RETURNING id, user_id, items, total, status, cancellation_reason, created_at, updated_at`,
       [userId, JSON.stringify(items), total]
     );
 
     const order = result.rows[0];
 
-    // Publish the event that kicks off the saga. Payment Service is
-    // listening for this and will decide whether the order gets confirmed
-    // or cancelled - the Order Service doesn't call Payment directly.
     publishEvent('order.created', {
       orderId: order.id,
       userId: order.user_id,
@@ -75,7 +67,6 @@ router.post('/', async (req, res) => {
   }
 });
 
-// GET /orders/:id - fetch a single order
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
   if (!/^\d+$/.test(id)) {
@@ -84,7 +75,7 @@ router.get('/:id', async (req, res) => {
 
   try {
     const result = await pool.query(
-      'SELECT id, user_id, items, total, status, created_at, updated_at FROM orders WHERE id = $1',
+      'SELECT id, user_id, items, total, status, cancellation_reason, created_at, updated_at FROM orders WHERE id = $1',
       [id]
     );
 
@@ -99,19 +90,16 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// GET /orders?userId=123 - list orders for a user
-// (If called through the Gateway, userId is also available via x-user-id;
-// the query param lets you explicitly ask "give me this user's orders".)
 router.get('/', async (req, res) => {
-  const { userId } = req.query;
+  const userId = resolveUserId(req);
 
-  if (!userId || !/^\d+$/.test(userId)) {
-    return res.status(400).json({ error: 'A numeric userId query parameter is required' });
+  if (!userId) {
+    return res.status(401).json({ error: 'Could not determine the requesting user' });
   }
 
   try {
     const result = await pool.query(
-      'SELECT id, user_id, items, total, status, created_at, updated_at FROM orders WHERE user_id = $1 ORDER BY created_at DESC',
+      'SELECT id, user_id, items, total, status, cancellation_reason, created_at, updated_at FROM orders WHERE user_id = $1 ORDER BY created_at DESC',
       [userId]
     );
 
