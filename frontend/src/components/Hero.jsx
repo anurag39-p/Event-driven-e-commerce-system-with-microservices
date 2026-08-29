@@ -15,7 +15,10 @@ export default function Hero() {
             Curated phones, laptops, audio and more — built for people who care about quality.
           </p>
           <Link
-            to="/products"
+            to="/"
+            onClick={() => {
+              document.getElementById('products-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }}
             className="mt-8 inline-flex items-center gap-2 rounded-full bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] px-8 py-3 text-sm font-medium hover:opacity-90 transition-opacity"
           >
             Shop Now

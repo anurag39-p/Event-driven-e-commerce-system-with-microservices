@@ -26,6 +26,7 @@ export default function CategoryTabs() {
 
   function selectCategory(slug) {
     const next = new URLSearchParams(searchParams);
+    next.delete('search');
     if (slug === 'all') {
       next.delete('category');
     } else {

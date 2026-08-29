@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Search, ShoppingBag, Menu, X, User, Package } from 'lucide-react';
+import { Search, ShoppingBag, Menu, X, User, Package, ChevronDown, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import ThemeToggle from './ThemeToggle.jsx';
 
@@ -19,13 +19,25 @@ export default function Navbar() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchValue, setSearchValue] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef(null);
   const { isAuthenticated, user, logout } = useAuth();
   const navigate = useNavigate();
+
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (accountMenuRef.current && !accountMenuRef.current.contains(e.target)) {
+        setAccountMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   function handleSearchSubmit(e) {
     e.preventDefault();
     if (searchValue.trim()) {
-      navigate(`/products?search=${encodeURIComponent(searchValue.trim())}`);
+      navigate(`/?search=${encodeURIComponent(searchValue.trim())}`);
     }
     setSearchOpen(false);
     setSearchValue('');
@@ -34,6 +46,7 @@ export default function Navbar() {
   function handleLogout() {
     logout();
     setMobileMenuOpen(false);
+    setAccountMenuOpen(false);
     navigate('/');
   }
 
@@ -90,13 +103,40 @@ export default function Navbar() {
 
               <div className="hidden md:flex items-center gap-1">
                 {isAuthenticated ? (
-                  <button
-                    onClick={handleLogout}
-                    className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full hover:bg-[hsl(var(--muted))] transition-colors"
-                  >
-                    <User className="h-4 w-4" />
-                    {user?.name?.split(' ')[0] || 'Account'}
-                  </button>
+                  <div className="relative" ref={accountMenuRef}>
+                    <button
+                      onClick={() => setAccountMenuOpen((o) => !o)}
+                      className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full hover:bg-[hsl(var(--muted))] transition-colors"
+                    >
+                      <User className="h-4 w-4" />
+                      {user?.name?.split(' ')[0] || 'Account'}
+                      <ChevronDown className={`h-3.5 w-3.5 transition-transform ${accountMenuOpen ? 'rotate-180' : ''}`} />
+                    </button>
+
+                    {accountMenuOpen && (
+                      <div className="absolute right-0 top-full mt-2 w-56 rounded-2xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-lg overflow-hidden py-1">
+                        <div className="px-4 py-3 border-b border-[hsl(var(--border))]">
+                          <p className="text-sm font-medium truncate">{user?.name}</p>
+                          <p className="text-xs text-[hsl(var(--muted-foreground))] truncate">{user?.email}</p>
+                        </div>
+                        <Link
+                          to="/orders"
+                          onClick={() => setAccountMenuOpen(false)}
+                          className="flex items-center gap-2 px-4 py-2.5 text-sm hover:bg-[hsl(var(--muted))] transition-colors"
+                        >
+                          <Package className="h-4 w-4" />
+                          Orders
+                        </Link>
+                        <button
+                          onClick={handleLogout}
+                          className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-left hover:bg-[hsl(var(--muted))] transition-colors"
+                        >
+                          <LogOut className="h-4 w-4" />
+                          Logout
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <Link
                     to="/login"

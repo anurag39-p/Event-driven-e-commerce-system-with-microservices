@@ -7,6 +7,42 @@ async function fetchProducts() {
   return res.data.products;
 }
 
+const CATEGORY_SYNONYMS = {
+  mobile: 'phones',
+  phone: 'phones',
+  phones: 'phones',
+  smartphone: 'phones',
+  smartphones: 'phones',
+  laptop: 'laptops',
+  laptops: 'laptops',
+  notebook: 'laptops',
+  notebooks: 'laptops',
+  tablet: 'tablets',
+  tablets: 'tablets',
+  tab: 'tablets',
+  tabs: 'tablets',
+  headphone: 'audio',
+  headphones: 'audio',
+  earbud: 'audio',
+  earbuds: 'audio',
+  gaming: 'gaming',
+  game: 'gaming',
+  games: 'gaming',
+};
+
+function matchesSearch(product, normalizedSearch) {
+  if (!normalizedSearch) return true;
+
+  if (product.name.toLowerCase().includes(normalizedSearch)) return true;
+  if ((product.description || '').toLowerCase().includes(normalizedSearch)) return true;
+  if (product.category.toLowerCase().includes(normalizedSearch)) return true;
+
+  const synonymCategory = CATEGORY_SYNONYMS[normalizedSearch];
+  if (synonymCategory && product.category === synonymCategory) return true;
+
+  return false;
+}
+
 function SkeletonGrid() {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-8">
@@ -54,11 +90,7 @@ export default function ProductGrid({ search = '', category = 'all' }) {
   const normalizedSearch = search.trim().toLowerCase();
   const filtered = (products || []).filter((p) => {
     const matchesCategory = category === 'all' || !category || p.category === category;
-    const matchesSearch =
-      !normalizedSearch ||
-      p.name.toLowerCase().includes(normalizedSearch) ||
-      (p.description || '').toLowerCase().includes(normalizedSearch);
-    return matchesCategory && matchesSearch;
+    return matchesCategory && matchesSearch(p, normalizedSearch);
   });
 
   if (filtered.length === 0) {

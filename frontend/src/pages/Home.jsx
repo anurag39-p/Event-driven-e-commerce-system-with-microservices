@@ -10,10 +10,10 @@ export default function Home() {
   const category = searchParams.get('category') || 'all';
 
   useEffect(() => {
-    if (category !== 'all') {
+    if (category !== 'all' || search) {
       document.getElementById('products-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
-  }, [category]);
+  }, [category, search]);
 
   return (
     <div>
