@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { ChevronDown, Package } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { api } from '../api/client.js';
+import OrderTimeline from '../components/OrderTimeline.jsx';
 
 const STATUS_STYLES = {
   PENDING: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
@@ -49,20 +50,34 @@ function OrderRow({ order }) {
       </button>
 
       {expanded && (
-        <div className="border-t border-[hsl(var(--border))] p-4 flex flex-col gap-3">
-          <p className="text-sm font-semibold sm:hidden">
-            Total: ₹{Number(order.total).toLocaleString('en-IN')}
-          </p>
-          {order.items.map((item, i) => (
-            <div key={i} className="flex items-center justify-between text-sm">
-              <span className="text-[hsl(var(--muted-foreground))]">
-                Qty {item.quantity} × ₹{Number(item.price).toLocaleString('en-IN')}
-              </span>
-              <span className="font-medium">
-                ₹{(item.price * item.quantity).toLocaleString('en-IN')}
-              </span>
+        <div className="border-t border-[hsl(var(--border))] p-4 flex flex-col gap-5">
+          {order.status === 'CANCELLED' && order.cancellation_reason && (
+            <p className="text-sm text-red-600 dark:text-red-400">
+              Cancellation reason: {order.cancellation_reason}
+            </p>
+          )}
+
+          <div className="flex flex-col gap-3">
+            <p className="text-sm font-semibold sm:hidden">
+              Total: ₹{Number(order.total).toLocaleString('en-IN')}
+            </p>
+            {order.items.map((item, i) => (
+              <div key={i} className="flex items-center justify-between text-sm">
+                <span className="text-[hsl(var(--muted-foreground))]">
+                  Qty {item.quantity} × ₹{Number(item.price).toLocaleString('en-IN')}
+                </span>
+                <span className="font-medium">
+                  ₹{(item.price * item.quantity).toLocaleString('en-IN')}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {order.timeline && order.timeline.length > 0 && (
+            <div className="pt-2 border-t border-[hsl(var(--border))]">
+              <OrderTimeline timeline={order.timeline} />
             </div>
-          ))}
+          )}
         </div>
       )}
     </div>

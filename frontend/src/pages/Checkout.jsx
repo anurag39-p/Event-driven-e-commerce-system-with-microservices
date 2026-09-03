@@ -5,6 +5,7 @@ import { Loader2, AlertCircle, Package, CheckCircle2, XCircle } from 'lucide-rea
 import { useCart } from '../context/CartContext.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
 import { api } from '../api/client.js';
+import OrderTimeline from '../components/OrderTimeline.jsx';
 
 const POLL_INTERVAL_MS = 2000;
 const POLL_TIMEOUT_MS = 30000;
@@ -139,6 +140,12 @@ export default function Checkout() {
               </div>
             ))}
           </div>
+
+          {order && displayOrder?.timeline && (
+            <div className="rounded-2xl border border-[hsl(var(--border))] p-5">
+              <OrderTimeline timeline={displayOrder.timeline} />
+            </div>
+          )}
         </div>
 
         <div className="lg:col-span-1">
@@ -173,6 +180,12 @@ export default function Checkout() {
                   </span>
                   {isPolling && <Loader2 className="h-3.5 w-3.5 animate-spin text-[hsl(var(--muted-foreground))]" />}
                 </div>
+
+                {currentStatus === 'CANCELLED' && displayOrder?.cancellation_reason && (
+                  <p className="text-xs text-[hsl(var(--muted-foreground))] mt-2">
+                    Reason: {displayOrder.cancellation_reason}
+                  </p>
+                )}
 
                 {timedOut && (
                   <p className="text-xs text-[hsl(var(--muted-foreground))] mt-3">

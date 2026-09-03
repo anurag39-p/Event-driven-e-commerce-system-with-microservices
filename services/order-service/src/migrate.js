@@ -15,10 +15,24 @@ async function runMigrations() {
     );
   `;
 
-  // Safe to run every startup, on a fresh table or an existing one -
-  // this is what actually adds the column to your already-running database.
   const addCancellationReasonColumn = `
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
+  `;
+
+  const createOrderEventsTable = `
+    CREATE TABLE IF NOT EXISTS order_events (
+      id SERIAL PRIMARY KEY,
+      order_id INTEGER NOT NULL REFERENCES orders(id),
+      event_name VARCHAR(50) NOT NULL,
+      service VARCHAR(100),
+      success BOOLEAN NOT NULL DEFAULT true,
+      detail TEXT,
+      occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `;
+
+  const createOrderEventsIndex = `
+    CREATE INDEX IF NOT EXISTS idx_order_events_order_id ON order_events(order_id);
   `;
 
   let retries = 10;
@@ -26,6 +40,8 @@ async function runMigrations() {
     try {
       await pool.query(createOrdersTable);
       await pool.query(addCancellationReasonColumn);
+      await pool.query(createOrderEventsTable);
+      await pool.query(createOrderEventsIndex);
       console.log('[order-service] Migration check complete: orders table ready');
       return;
     } catch (err) {

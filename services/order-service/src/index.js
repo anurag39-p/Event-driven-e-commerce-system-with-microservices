@@ -5,6 +5,7 @@ const { runMigrations } = require('./migrate');
 const { ensureIdempotencyTable, getDlqStatus, replayDlq } = require('./reliability');
 const { connectRabbit, startPaymentResultConsumer, getChannel, getTopology, QUEUE } = require('./rabbit');
 const { updateOrderStatus } = require('./orderStatus');
+const { recordEvent } = require('./orderTimeline');
 const orderRoutes = require('./orderRoutes');
 
 const app = express();
@@ -51,10 +52,15 @@ app.post('/admin/dlq/replay', async (req, res) => {
 
 async function handlePaymentResult(routingKey, payload) {
   const { orderId, reason } = payload;
+
   if (routingKey === 'payment.succeeded') {
+    await recordEvent(orderId, 'PaymentSuccessful', 'Payment Service', true);
     await updateOrderStatus(orderId, 'CONFIRMED');
+    await recordEvent(orderId, 'OrderConfirmed', 'Order Service', true);
   } else if (routingKey === 'payment.failed') {
+    await recordEvent(orderId, 'PaymentFailed', 'Payment Service', false, reason);
     await updateOrderStatus(orderId, 'CANCELLED', reason);
+    await recordEvent(orderId, 'OrderCancelled', 'Order Service', true, reason);
   } else {
     throw new Error(`Unrecognized routing key: ${routingKey}`);
   }

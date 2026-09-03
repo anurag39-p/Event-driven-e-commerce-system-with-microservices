@@ -1,6 +1,7 @@
 const express = require('express');
 const pool = require('./db');
 const { publishEvent } = require('./rabbit');
+const { recordEvent, getTimeline, getTimelinesForOrders } = require('./orderTimeline');
 
 const router = express.Router();
 
@@ -53,12 +54,16 @@ router.post('/', async (req, res) => {
 
     const order = result.rows[0];
 
+    await recordEvent(order.id, 'OrderCreated', 'Order Service', true);
+
     publishEvent('order.created', {
       orderId: order.id,
       userId: order.user_id,
       items: order.items,
       total: order.total,
     });
+
+    await recordEvent(order.id, 'PaymentInitiated', 'RabbitMQ \u2192 Payment Service', true);
 
     return res.status(201).json({ order });
   } catch (err) {
@@ -83,7 +88,10 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Order not found' });
     }
 
-    return res.status(200).json({ order: result.rows[0] });
+    const order = result.rows[0];
+    order.timeline = await getTimeline(order.id);
+
+    return res.status(200).json({ order });
   } catch (err) {
     console.error('[order-service] Get order error:', err.message);
     return res.status(500).json({ error: 'Internal server error' });
@@ -103,7 +111,13 @@ router.get('/', async (req, res) => {
       [userId]
     );
 
-    return res.status(200).json({ orders: result.rows, count: result.rows.length });
+    const orders = result.rows;
+    const timelines = await getTimelinesForOrders(orders.map((o) => o.id));
+    for (const order of orders) {
+      order.timeline = timelines[order.id] || [];
+    }
+
+    return res.status(200).json({ orders, count: orders.length });
   } catch (err) {
     console.error('[order-service] List orders error:', err.message);
     return res.status(500).json({ error: 'Internal server error' });
