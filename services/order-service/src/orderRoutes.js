@@ -78,6 +78,11 @@ router.get('/:id', async (req, res) => {
     return res.status(400).json({ error: 'Invalid order id' });
   }
 
+  const userId = resolveUserId(req);
+  if (!userId) {
+    return res.status(401).json({ error: 'Could not determine the requesting user' });
+  }
+
   try {
     const result = await pool.query(
       'SELECT id, user_id, items, total, status, cancellation_reason, created_at, updated_at FROM orders WHERE id = $1',
@@ -89,6 +94,11 @@ router.get('/:id', async (req, res) => {
     }
 
     const order = result.rows[0];
+
+    if (order.user_id !== userId) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
     order.timeline = await getTimeline(order.id);
 
     return res.status(200).json({ order });

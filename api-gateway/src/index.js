@@ -84,6 +84,10 @@ Object.entries(targets).forEach(([prefix, target]) => {
   );
 });
 
-app.listen(PORT, () => {
-  console.log(`[api-gateway] listening on port ${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`[api-gateway] listening on port ${PORT}`);
+  });
+}
+
+module.exports = { app, isPublicPath, verifyJWT };

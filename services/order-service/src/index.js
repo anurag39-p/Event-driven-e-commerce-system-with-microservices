@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const pool = require('./db');
 const { runMigrations } = require('./migrate');
 const { ensureIdempotencyTable, getDlqStatus, replayDlq } = require('./reliability');
@@ -13,6 +14,7 @@ app.use(express.json());
 
 const SERVICE_NAME = 'order-service';
 const PORT = process.env.PORT || 4003;
+const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_change_me';
 
 app.get('/health', (req, res) => {
   res.status(200).json({
@@ -24,7 +26,22 @@ app.get('/health', (req, res) => {
 
 app.use('/', orderRoutes);
 
-app.get('/admin/dlq', async (req, res) => {
+function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or malformed Authorization header' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  try {
+    jwt.verify(token, JWT_SECRET);
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+app.get('/admin/dlq', requireAuth, async (req, res) => {
   try {
     const topology = getTopology();
     if (!topology) {
@@ -37,7 +54,7 @@ app.get('/admin/dlq', async (req, res) => {
   }
 });
 
-app.post('/admin/dlq/replay', async (req, res) => {
+app.post('/admin/dlq/replay', requireAuth, async (req, res) => {
   try {
     const topology = getTopology();
     if (!topology) {
@@ -77,7 +94,11 @@ async function start() {
   });
 }
 
-start().catch((err) => {
-  console.error(`[${SERVICE_NAME}] Failed to start:`, err.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  start().catch((err) => {
+    console.error(`[${SERVICE_NAME}] Failed to start:`, err.message);
+    process.exit(1);
+  });
+}
+
+module.exports = { app, handlePaymentResult, requireAuth };

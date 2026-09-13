@@ -1,11 +1,12 @@
-﻿{
+{
   "name": "notification-service",
   "version": "1.0.0",
   "description": "notification-service for event-driven e-commerce system",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "test": "jest"
   },
   "dependencies": {
     "express": "^4.19.2",
@@ -16,6 +17,7 @@
     "uuid": "^10.0.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.4"
+    "nodemon": "^3.1.4",
+    "jest": "^30.5.1"
   }
 }
