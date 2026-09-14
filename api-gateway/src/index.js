@@ -9,9 +9,12 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_change_me';
 
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
+const ALLOWED_ORIGINS = (process.env.FRONTEND_ORIGINS || 'http://localhost:5173,http://localhost:4173')
+  .split(',')
+  .map((origin) => origin.trim());
+
 app.use(cors({
-  origin: FRONTEND_ORIGIN,
+  origin: ALLOWED_ORIGINS,
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
