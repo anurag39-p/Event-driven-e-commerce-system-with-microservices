@@ -25,6 +25,7 @@ export default function Checkout() {
   const [orderPlacedAt, setOrderPlacedAt] = useState(null);
   const [error, setError] = useState('');
   const [hasClearedCart, setHasClearedCart] = useState(false);
+  const [orderedItems, setOrderedItems] = useState([]);
 
   async function handlePlaceOrder() {
     setError('');
@@ -36,6 +37,8 @@ export default function Checkout() {
         quantity: item.quantity,
         price: item.price,
       }));
+
+      setOrderedItems(items);
 
       const res = await api.post('/orders', { items: orderItems });
       setOrder(res.data.order);
@@ -51,6 +54,7 @@ export default function Checkout() {
     setOrder(null);
     setOrderPlacedAt(null);
     setError('');
+    setOrderedItems([]);
   }
 
   const { data: liveOrder } = useQuery({
@@ -75,6 +79,14 @@ export default function Checkout() {
     orderPlacedAt &&
     Date.now() - orderPlacedAt > POLL_TIMEOUT_MS;
   const isPolling = currentStatus === 'PENDING' && !timedOut;
+
+  const displayItems = order ? orderedItems : items;
+  const displaySubtotal = order
+    ? orderedItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
+    : subtotal;
+  const displayItemCount = order
+    ? orderedItems.reduce((sum, item) => sum + item.quantity, 0)
+    : totalItemCount;
 
   useEffect(() => {
     if (currentStatus === 'CONFIRMED' && !hasClearedCart) {
@@ -117,7 +129,7 @@ export default function Checkout() {
           )}
 
           <div className="flex flex-col gap-6">
-            {items.map((item) => (
+            {displayItems.map((item) => (
               <div key={item.productId} className="flex gap-4 pb-6 border-b border-[hsl(var(--border))]">
                 <div className="h-20 w-20 shrink-0 rounded-2xl bg-[hsl(var(--muted))] flex items-center justify-center p-2.5">
                   {item.imageUrl ? (
@@ -152,12 +164,12 @@ export default function Checkout() {
           <div className="rounded-2xl border border-[hsl(var(--border))] p-6 lg:sticky lg:top-20">
             <h2 className="text-lg font-semibold mb-4">Order Summary</h2>
             <div className="flex justify-between text-sm text-[hsl(var(--muted-foreground))]">
-              <span>Items ({totalItemCount})</span>
-              <span>₹{subtotal.toLocaleString('en-IN')}</span>
+              <span>Items ({displayItemCount})</span>
+              <span>₹{displaySubtotal.toLocaleString('en-IN')}</span>
             </div>
             <div className="flex justify-between text-base font-semibold mt-4 pt-4 border-t border-[hsl(var(--border))]">
               <span>Total</span>
-              <span>₹{subtotal.toLocaleString('en-IN')}</span>
+              <span>₹{displaySubtotal.toLocaleString('en-IN')}</span>
             </div>
 
             {order ? (
