@@ -1,645 +1,152 @@
 # Event-Driven E-Commerce System
 
-Phase 1: Infrastructure Skeleton — every container running and talking to each other.
+![Node.js](https://img.shields.io/badge/Node.js-20-339933?logo=node.js&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
+![RabbitMQ](https://img.shields.io/badge/RabbitMQ-3.13-FF6600?logo=rabbitmq&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![MongoDB](https://img.shields.io/badge/MongoDB-8-47A248?logo=mongodb&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![Jest](https://img.shields.io/badge/Tested%20with-Jest-C21325?logo=jest&logoColor=white)
+![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
 
-## What's in this phase
+A distributed, event-driven e-commerce platform: 6 independent microservices communicating asynchronously over RabbitMQ, coordinating order fulfillment through a saga pattern, backed by production-grade reliability engineering (idempotency, retry with backoff, dead-letter queues) — not a monolith split into folders, and not a tutorial clone.
 
-- 5 Express microservices (user, product, order, payment, notification), each just a `/health` stub for now
-- An API Gateway that proxies `/api/*` routes to the right service
-- PostgreSQL + RabbitMQ running via Docker Compose
-- MongoDB is assumed to be running **locally on your machine** (since you already have it installed) — containers reach it via `host.docker.internal`
+## Skills Demonstrated
 
-## Prerequisites
-
-- Docker Desktop installed and running
-- Your local MongoDB running (default port 27017)
-
-## Setup
-
-```bash
-# 1. Copy the environment file (already done for you, but if starting fresh):
-cp .env.example .env
-
-# 2. Build and start everything
-docker-compose up --build
-```
-
-First build will take a minute or two (pulling base images, installing npm deps in each container).
-
-## Verify it's working
-
-Once containers are up, check each service's health endpoint:
-
-```bash
-curl http://localhost:4000/health   # API Gateway
-curl http://localhost:4001/health   # User Service (direct)
-curl http://localhost:4002/health   # Product Service (direct)
-curl http://localhost:4003/health   # Order Service (direct)
-curl http://localhost:4004/health   # Payment Service (direct)
-curl http://localhost:4005/health   # Notification Service (direct)
-```
-
-Each should return something like:
-```json
-{ "service": "order-service", "status": "ok", "timestamp": "2026-07-05T..." }
-```
-
-Also check that routing through the Gateway works — this proves the proxy layer is wired correctly:
-
-```bash
-curl http://localhost:4000/api/orders/health
-```
-
-(Note: since each service's `/health` route sits at its root, and the Gateway strips `/api/orders`, hitting `/api/orders/health` should route to order-service's `/health`.)
-
-## Check the infra
-
-- **RabbitMQ Management UI**: http://localhost:15672 (login: `guest` / `guest`) — should show an empty but running broker
-- **PostgreSQL**: connect on `localhost:5432` with user `admin` / password `admin123` / db `ecommerce` (via pgAdmin, DBeaver, or `psql`)
-
-## Project structure
-
-```
-ecommerce/
-├── docker-compose.yml
-├── .env.example
-├── api-gateway/
-│   ├── Dockerfile
-│   ├── package.json
-│   └── src/index.js
-├── services/
-│   ├── user-service/
-│   ├── product-service/
-│   ├── order-service/
-│   ├── payment-service/
-│   └── notification-service/
-│       (each: Dockerfile, package.json, src/index.js)
-└── frontend/          (React app — added in Phase 8)
-```
-
-## Phase 1 checkpoint (don't move on until this passes)
-
-- [ ] `docker-compose up` boots all 7 containers (postgres, rabbitmq, 5 services) with no crash loops
-- [ ] All 5 services respond on their direct health endpoints
-- [ ] API Gateway successfully proxies at least one request through to a service
-- [ ] RabbitMQ management UI loads in the browser
-- [ ] You can connect to PostgreSQL with a client of your choice
-
-## Troubleshooting
-
-- **Port already in use**: something else on your machine is using 4000-4005, 5432, 5672, or 15672. Stop it or change the port mapping in `docker-compose.yml`.
-- **`host.docker.internal` not resolving (Linux)**: this hostname works out of the box on Docker Desktop (Mac/Windows). On native Linux Docker, add this under each service that needs Mongo:
-  ```yaml
-  extra_hosts:
-    - "host.docker.internal:host-gateway"
-  ```
-- **Service crash-looping**: run `docker-compose logs <service-name>` to see the error.
-
-
-
-
-
-
-
-# Event-Driven E-Commerce Platform
-
-A microservices-based e-commerce platform built around asynchronous, event-driven communication using RabbitMQ. The system demonstrates distributed order processing, Saga orchestration, fault handling, idempotency, JWT-based authorization, and containerized service deployment.
+- **Distributed systems design** — 6 independently deployable services, each owning its own database, communicating only through events or a gateway — no service reaches into another's data
+- **Event-driven architecture** — a real saga pattern coordinating order creation, payment, inventory, and notifications across services via a RabbitMQ topic exchange
+- **Production reliability engineering** — idempotency, exponential backoff retry, and dead-letter queues, built from scratch and hardened against real bugs (see below)
+- **Full-stack ownership** — React/Vite frontend, Node/Express backend, PostgreSQL + MongoDB, JWT auth, all containerized with Docker Compose
+- **Testing discipline** — Jest unit test suites across all 6 backend services (mocked dependencies, no live infrastructure required), running automatically in CI on every push
+- **Security-conscious debugging** — found and fixed a real authorization bypass and a cross-account data leak, both through deliberate testing and end-to-end verification, not by accident
 
 ## Architecture
 
-The application is divided into independent services responsible for different business capabilities.
-
-```text
-                         ┌─────────────────┐
-                         │   React Client  │
-                         └────────┬────────┘
-                                  │
-                                  ▼
-                         ┌─────────────────┐
-                         │   API Gateway   │
-                         └────────┬────────┘
-                                  │
-              ┌───────────────────┼───────────────────┐
-              │                   │                   │
-              ▼                   ▼                   ▼
-       ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-       │    User     │     │   Product   │     │    Order    │
-       │   Service   │     │   Service   │     │   Service   │
-       └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
-              │                   │                   │
-              ▼                   ▼                   │
-        PostgreSQL             MongoDB                │
-                                                      │
-                                                      ▼
-                                             ┌────────────────┐
-                                             │    RabbitMQ    │
-                                             │ Event Exchange │
-                                             └───────┬────────┘
-                                                     │
-                                                     ▼
-                                             ┌────────────────┐
-                                             │ Payment Service │
-                                             └───────┬────────┘
-                                                     │
-                                                     │ Payment Result
-                                                     ▼
-                                             ┌────────────────┐
-                                             │    RabbitMQ    │
-                                             └───────┬────────┘
-                                                     │
-                                                     ▼
-                                             ┌────────────────┐
-                                             │ Order Service  │
-                                             └────────────────┘
-Key Features
-Microservices-based architecture
-Event-driven communication using RabbitMQ
-Saga-based order/payment orchestration
-Asynchronous payment processing
-Payment success and compensating failure workflows
-Retry handling and Dead Letter Queues (DLQ)
-Idempotent event processing
-JWT-based authentication and authorization
-User-scoped carts and orders
-Product search and category filtering
-Asynchronous checkout with order-status polling
-Order history
-Persisted order lifecycle events
-Order timeline with backend-generated timestamps
-Docker and Docker Compose based deployment
-PostgreSQL and MongoDB for service-specific persistence
-Jest-based backend testing
-Services
-1. User Service
-
-Responsible for:
-
-User registration
-User authentication
-Password validation
-JWT generation
-User identity used for authorization
-
-Database:
-
-PostgreSQL
-
-2. Product Service
-
-Responsible for:
-
-Product catalog
-Product information
-Product search
-Category-based filtering
-Product availability
-
-Database:
-
-MongoDB
-
-3. Order Service
-
-Responsible for:
-
-Creating orders
-Maintaining order state
-Publishing order events
-Consuming payment results
-Maintaining order history
-Persisting order lifecycle events
-Authorization for user orders
-
-Order states:
-
-PENDING
-   │
-   ├──────────────► CONFIRMED
-   │
-   └──────────────► CANCELLED
-
-The Order Service acts as the primary coordinator for the order/payment workflow.
-
-Database:
-
-PostgreSQL
-
-4. Payment Service
-
-Responsible for:
-
-Consuming payment requests
-Simulating payment processing
-Publishing payment success/failure events
-Returning failure reasons
-
-Example payment outcomes:
-
-OrderCreated
-     │
-     ▼
-PaymentInitiated
-     │
-     ├──────────────► PaymentSucceeded
-     │                       │
-     │                       ▼
-     │                OrderConfirmed
-     │
-     └──────────────► PaymentFailed
-                             │
-                             ▼
-                       OrderCancelled
-5. Notification Service
-
-Responsible for consuming relevant system events and providing the foundation for event-driven notifications.
-
-Event-Driven Order Processing
-
-RabbitMQ is used to decouple services and allow asynchronous communication.
-
-The main order flow is:
-
-React
-  │
-  ▼
-API Gateway
-  │
-  ▼
-Order Service
-  │
-  ├── Create PENDING order
-  │
-  ├── Record OrderCreated
-  │
-  └── Publish OrderCreated
-              │
-              ▼
-          RabbitMQ
-              │
-              ▼
-      Payment Service
-              │
-       Process payment
-              │
-       ┌──────┴──────┐
-       │             │
-       ▼             ▼
- PaymentSucceeded  PaymentFailed
-       │             │
-       ▼             ▼
-    RabbitMQ      RabbitMQ
-       │             │
-       ▼             ▼
- Order Service    Order Service
-       │             │
-       ▼             ▼
-   CONFIRMED      CANCELLED
+```mermaid
+flowchart TD
+    Client[React Frontend] --> Gateway[API Gateway<br/>JWT auth, rate limiting, CORS]
+    Gateway --> UserSvc[User Service<br/>Postgres]
+    Gateway --> ProductSvc[Product Service<br/>MongoDB]
+    Gateway --> OrderSvc[Order Service<br/>Postgres]
 
-This avoids making the Order Service synchronously depend on the Payment Service.
-
-Saga Workflow
-
-The order/payment workflow follows a Saga-style approach.
-
-Successful workflow
-OrderCreated
-     ↓
-PaymentInitiated
-     ↓
-PaymentSuccessful
-     ↓
-OrderConfirmed
-Failure / compensation workflow
-OrderCreated
-     ↓
-PaymentInitiated
-     ↓
-PaymentFailed
-     ↓
-OrderCancelled
+    OrderSvc -- order.created --> Bus((RabbitMQ<br/>topic exchange))
+    Bus --> PaymentSvc[Payment Service]
+    Bus --> ProductSvc
 
-When payment fails, the order is transitioned to CANCELLED and the failure reason is persisted.
+    PaymentSvc -- payment.succeeded / payment.failed --> Bus
+    Bus --> OrderSvc
+    Bus --> ProductSvc
+    Bus --> NotificationSvc[Notification Service<br/>email via Resend]
+```
 
-Example:
+## The Order Saga
 
-Cancellation reason:
-Simulated card decline
-Order Timeline
+Placing an order triggers a real, asynchronous chain of events — the heart of the system:
 
-The system persists important order lifecycle events instead of keeping the timeline only in the frontend.
+1. **Order Service** inserts the order (`PENDING`) and publishes `order.created` to a RabbitMQ topic exchange
+2. **Payment Service** and **Product Service** independently react to that same event — Payment Service simulates a charge; Product Service reserves stock
+3. Payment Service publishes `payment.succeeded` or `payment.failed`
+4. **Order Service** updates the order to `CONFIRMED`/`CANCELLED`; **Product Service** releases reserved stock on failure (a compensating transaction); **Notification Service** sends a real email
 
-Example:
-
-Order Created
-23:37:36.855
-
-Payment Initiated
-23:37:36.862
+Every step is recorded as a persisted, millisecond-precision timeline entry — visible live in the frontend as the order resolves, and permanently in order history afterward.
 
-Payment Failed
-23:37:36.902
-Simulated card decline
+## Reliability Patterns
 
-Order Cancelled
-23:37:36.909
-Simulated card decline
-
-For a successful order:
-
-Order Created
-      ↓
-Payment Initiated
-      ↓
-Payment Successful
-      ↓
-Order Confirmed
-
-Each event contains information such as:
-
-Event name
-Responsible service
-Success/failure state
-Event detail/reason
-Backend-generated timestamp
-
-This provides visibility into the asynchronous workflow across service boundaries.
-
-Reliability
-
-The system includes several mechanisms intended to make asynchronous processing more reliable.
-
-Idempotency
-
-Events are processed in an idempotent manner to reduce the risk of duplicate processing when messages are redelivered.
-
-Retry Handling
-
-Transient processing failures can be retried rather than immediately losing the event.
-
-Dead Letter Queue
-
-Messages that cannot be successfully processed after retry attempts can be routed to a Dead Letter Queue for further investigation.
-
-Persisted Events
-
-Important order lifecycle events are persisted so that the state transition history remains available after the request itself has completed.
-
-Authentication & Authorization
-
-Authentication is implemented using JWT.
-
-The general flow is:
-
-Login
-  ↓
-User Service
-  ↓
-JWT
-  ↓
-React
-  ↓
-Authorization Header
-  ↓
-API Gateway / Services
-
-Authorization is enforced using the authenticated user's identity.
-
-Users can only access their own:
-
-Cart
-Orders
-Order history
-
-For example, a user cannot retrieve another user's order simply by changing the order ID.
-
-Frontend
-
-The frontend is built using React and Vite.
-
-Main functionality includes:
-
-Product catalog
-Category filtering
-Product search
-Shopping cart
-Per-user cart isolation
-Checkout
-Asynchronous order status polling
-Order history
-Order status display
-Order lifecycle timeline
-Login and registration
-JWT-based authentication
-Responsive UI
-
-The checkout does not assume that payment completes synchronously.
-
-Instead:
-
-Create Order
-     ↓
-PENDING
-     ↓
-Poll Order Status
-     ↓
-CONFIRMED / CANCELLED
-
-This reflects the asynchronous nature of the backend architecture.
-
-Technology Stack
-Frontend
-React
-Vite
-JavaScript
-React Router
-Context API
-TanStack Query
-CSS
-Backend
-Node.js
-Express.js
-REST APIs
-Messaging
-RabbitMQ
-AMQP
-Event-driven communication
-Databases
-PostgreSQL
-MongoDB
-Authentication
-JWT
-Testing
-Jest
-Supertest
-DevOps
-Docker
-Docker Compose
-Project Structure
-Event-Driven E-Commerce System/
-│
-├── frontend/
-│
-├── services/
-│   ├── api-gateway/
-│   ├── user-service/
-│   ├── product-service/
-│   ├── order-service/
-│   ├── payment-service/
-│   └── notification-service/
-│
-├── docker-compose.yml
-│
-└── README.md
-
-The exact directory structure may vary as services evolve.
-
-Running the Project
-Prerequisites
-
-Install:
-
-Docker Desktop
-Docker Compose
-Git
-
-The application services, databases, and RabbitMQ can be started through Docker Compose.
-
-Start the system
+Every consumer wraps its message handling in three layers:
+
+- **Idempotency** — a `processed_events` table, scoped per-service (not globally), prevents duplicate processing when RabbitMQ redelivers a message
+- **Retry with backoff** — transient failures get requeued with a delay (up to 3 attempts) before being treated as permanent
+- **Dead-letter queue** — messages that exhaust retries land somewhere inspectable, with admin endpoints to review and replay them
+
+## Real Bugs Found and Fixed
+
+This is the part worth reading closely — these are subtle distributed-systems failure modes that produce **no error, no crash, just silently incorrect behavior**, found through deliberate testing rather than luck:
+
+| Bug | Impact | How it was found |
+|---|---|---|
+| Missing message IDs | Every message after the first was wrongly treated as a duplicate | Manual saga testing |
+| RabbitMQ rewrites routing keys on dead-letter redelivery | Retried messages silently did nothing instead of retrying | Manual saga testing |
+| Globally-scoped idempotency table | One event fanning out to 3 services meant whichever processed first silently blocked the other two | Manual saga testing |
+| **Authorization bypass**: `GET /orders/:id` had no ownership check | Any authenticated user could fetch any other user's order by guessing its ID | Writing the test suite's authorization tests |
+| **Cross-account cart leak**: a single shared `localStorage` key | Logging in as a different user on the same browser showed the previous user's cart | Manual end-to-end testing |
+| Unauthenticated admin endpoints | `/admin/dlq` reachable with no auth when hit directly on a service's port, bypassing the Gateway | Security review |
+
+## Tech Stack
+
+**Backend** — Node.js, Express, PostgreSQL, MongoDB, RabbitMQ, JWT, Jest
+
+**Frontend** — React, Vite, Tailwind CSS v4, TanStack Query, React Hook Form, Context API + `useReducer`
+
+## Features
+
+- JWT authentication with persistent sessions
+- Product catalog with category filtering and search (including synonym matching — searching "mobile" finds phones)
+- Per-user, `localStorage`-persisted shopping cart
+- Checkout with **live order-status polling** — watch an order resolve from `PENDING` to `CONFIRMED`/`CANCELLED` in real time, no refresh
+- A **persisted, millisecond-precision order timeline** for every saga step
+- Order history with cancellation reasons
+- Dark/light theme, responsive UI
+
+## Getting Started
+
+### Prerequisites
+- Docker & Docker Compose
+- MongoDB running locally (Product Service connects to it via `host.docker.internal`)
+
+### Setup
+
+```bash
+git clone <this-repo>
+cd event-driven-ecommerce
+cp .env.example .env
 docker-compose up --build
+```
 
-To run in detached mode:
+Seed the product catalog:
+```bash
+docker-compose exec product-service npm run seed
+```
 
-docker-compose up --build -d
+- Frontend: http://localhost:5173
+- API Gateway: http://localhost:4000
+- RabbitMQ Management UI: http://localhost:15672 (`admin` / `admin123`)
 
-Check running containers:
+### Verifying a production frontend build
 
-docker-compose ps
+```bash
+docker-compose exec frontend npm run build
+docker-compose exec frontend npm run preview
+```
 
-View logs:
+## Running Tests
 
-docker-compose logs -f
+Every backend service has its own Jest suite, fully mocked (no live database or RabbitMQ connection required):
 
-View logs for a specific service:
-
-docker-compose logs -f order-service
-Testing
-
-Backend tests use Jest.
-
-For the Order Service:
-
+```bash
 docker-compose run --rm order-service npm test
+docker-compose run --rm payment-service npm test
+docker-compose run --rm product-service npm test
+docker-compose run --rm notification-service npm test
+docker-compose run --rm user-service npm test
+docker-compose run --rm api-gateway npm test
+```
 
-The tests cover critical behavior such as:
+These run automatically via **GitHub Actions** on every push and pull request (`.github/workflows/backend-tests.yml`).
 
-Order creation
-Order authorization
-Payment success
-Payment failure
-Cancellation handling
-Order status transitions
-Order timeline events
+## Project Structure
+.
+├── api-gateway/
+├── frontend/
+├── services/
+│ ├── user-service/
+│ ├── product-service/
+│ ├── order-service/
+│ ├── payment-service/
+│ └── notification-service/
+├── .github/workflows/
+└── docker-compose.yml
+## Known Limitations
 
-Additional test coverage can be expanded as the project evolves.
-
-Example Order Lifecycle
-Successful Payment
-User places order
-       ↓
-Order Service creates PENDING order
-       ↓
-OrderCreated event
-       ↓
-RabbitMQ
-       ↓
-Payment Service
-       ↓
-Payment successful
-       ↓
-PaymentSuccessful event
-       ↓
-RabbitMQ
-       ↓
-Order Service
-       ↓
-Order CONFIRMED
-Failed Payment
-User places order
-       ↓
-Order Service creates PENDING order
-       ↓
-OrderCreated event
-       ↓
-RabbitMQ
-       ↓
-Payment Service
-       ↓
-Payment fails
-       ↓
-PaymentFailed event
-       ↓
-RabbitMQ
-       ↓
-Order Service
-       ↓
-Order CANCELLED
-       ↓
-Cancellation reason persisted
-Engineering Concepts Demonstrated
-
-This project was built to explore practical distributed-system concepts rather than only traditional CRUD operations.
-
-Key concepts include:
-
-Microservices
-Event-driven architecture
-Asynchronous messaging
-Saga pattern
-Eventual consistency
-Idempotency
-Retry mechanisms
-Dead Letter Queues
-Service-specific databases
-JWT authentication
-Authorization
-Distributed workflow tracking
-Containerization
-Automated testing
-Future Improvements
-
-Possible future improvements include:
-
-Increased automated test coverage
-Integration and end-to-end testing
-Centralized logging
-Metrics and monitoring
-Distributed tracing
-Production deployment
-CI/CD pipeline
-Improved notification workflows
-More sophisticated payment integration
-
-These are intentionally kept separate from the current architecture so that additional infrastructure can be introduced when required.
-
-Project Goals
-
-The primary goal of this project is to demonstrate how an e-commerce workflow can be designed using distributed services and asynchronous communication.
-
-Instead of implementing the application as a single monolithic backend, the project separates business responsibilities and uses RabbitMQ to coordinate asynchronous workflows between services.
-
-The project focuses particularly on:
-
-reliability, asynchronous communication, failure handling, authorization, and observability of distributed order processing.
-
-
-### One change I'd make before putting this on GitHub
-
-Your README currently says **"real-time order lifecycle timeline"** in places. Since you're using polling rather than SSE/WebSockets, I'd use **"order lifecycle timeline"** or **"live order-status tracking"** instead.
-
-For example:
-
-> `Order lifecycle timeline with backend-generated timestamps`
-
-is technically precise and actually **stronger** for an engineering portfolio because it tells the reviewer that the events are persisted by the backend rather than being fake frontend status updates.
-
-Also, once your Jest work is finished, update the Testing section with the **actual test count**, e.g. `32 tes
+- Payment Service simulates outcomes (10% decline rate, 10% simulated transient failure) rather than integrating a real payment provider
+- Single-instance services — the reliability design assumes one instance per service, not horizontal scaling
+- No integration/E2E test suite yet — current tests are unit-level with mocked dependencies
