@@ -80,3 +80,24 @@ describe('handlePaymentResult - unrecognized routing key', () => {
     expect(updateOrderStatus).not.toHaveBeenCalled();
   });
 });
+
+describe('handlePaymentResult - stock reservation failure', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  const reason = 'Insufficient stock for "Widget" (requested 5, available 1)';
+
+  test('cancels the order with the stock-shortfall reason, same as a payment failure', async () => {
+    await handlePaymentResult('stock.reservation.failed', { orderId: 12, reason });
+    expect(updateOrderStatus).toHaveBeenCalledWith(12, 'CANCELLED', reason);
+  });
+
+  test('records a StockReservationFailed timeline event with success=false and the reason', async () => {
+    await handlePaymentResult('stock.reservation.failed', { orderId: 12, reason });
+    expect(recordEvent).toHaveBeenCalledWith(12, 'StockReservationFailed', 'Product Service', false, reason);
+  });
+
+  test('records an OrderCancelled timeline event with the reason', async () => {
+    await handlePaymentResult('stock.reservation.failed', { orderId: 12, reason });
+    expect(recordEvent).toHaveBeenCalledWith(12, 'OrderCancelled', 'Order Service', true, reason);
+  });
+});

@@ -54,7 +54,7 @@ router.post('/login', async (req, res) => {
 
   try {
     const result = await pool.query(
-      'SELECT id, email, name, password_hash FROM users WHERE email = $1',
+      'SELECT id, email, name, password_hash, is_admin FROM users WHERE email = $1',
       [email]
     );
 
@@ -70,14 +70,14 @@ router.post('/login', async (req, res) => {
     }
 
     const token = jwt.sign(
-      { sub: user.id, email: user.email },
+      { sub: user.id, email: user.email, isAdmin: user.is_admin === true },
       JWT_SECRET,
       { expiresIn: JWT_EXPIRES_IN }
     );
 
     return res.status(200).json({
       token,
-      user: { id: user.id, email: user.email, name: user.name },
+      user: { id: user.id, email: user.email, name: user.name, isAdmin: user.is_admin === true },
     });
   } catch (err) {
     console.error('[user-service] Login error:', err.message);
@@ -105,7 +105,7 @@ function requireAuth(req, res, next) {
 router.get('/me', requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, email, name, created_at FROM users WHERE id = $1',
+      'SELECT id, email, name, is_admin, created_at FROM users WHERE id = $1',
       [req.user.sub]
     );
 

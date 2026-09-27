@@ -10,15 +10,23 @@ async function runMigrations() {
       email VARCHAR(255) UNIQUE NOT NULL,
       password_hash VARCHAR(255) NOT NULL,
       name VARCHAR(255),
+      is_admin BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `;
+
+  // Idempotent: safe to run against a DB that already has the users table
+  // from before is_admin existed.
+  const addIsAdminColumn = `
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
   `;
 
   let retries = 10;
   while (retries > 0) {
     try {
       await pool.query(createUsersTable);
-      console.log('[user-service] Migration check complete: users table ready');
+      await pool.query(addIsAdminColumn);
+      console.log('[user-service] Migration check complete: users table ready (with is_admin)');
       return;
     } catch (err) {
       retries -= 1;

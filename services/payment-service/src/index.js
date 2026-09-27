@@ -21,7 +21,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-function requireAuth(req, res, next) {
+function requireAdmin(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Missing or malformed Authorization header' });
@@ -29,14 +29,18 @@ function requireAuth(req, res, next) {
 
   const token = authHeader.split(' ')[1];
   try {
-    jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.isAdmin !== true) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    req.user = decoded;
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
 
-app.get('/admin/dlq', requireAuth, async (req, res) => {
+app.get('/admin/dlq', requireAdmin, async (req, res) => {
   try {
     const topology = getTopology();
     if (!topology) {
@@ -49,7 +53,7 @@ app.get('/admin/dlq', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/admin/dlq/replay', requireAuth, async (req, res) => {
+app.post('/admin/dlq/replay', requireAdmin, async (req, res) => {
   try {
     const topology = getTopology();
     if (!topology) {
@@ -94,4 +98,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, handleOrderCreated, requireAuth };
+module.exports = { app, handleOrderCreated, requireAdmin };

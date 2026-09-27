@@ -70,7 +70,7 @@ describe('POST /login', () => {
 
   test('returns a token and user on correct credentials', async () => {
     pool.query.mockResolvedValueOnce({
-      rows: [{ id: 1, email: 'a@b.com', name: 'Ada', password_hash: 'hashed-value' }],
+      rows: [{ id: 1, email: 'a@b.com', name: 'Ada', password_hash: 'hashed-value', is_admin: false }],
     });
     bcrypt.compare.mockResolvedValueOnce(true);
     jwt.sign.mockReturnValueOnce('fake.jwt.token');
@@ -81,8 +81,33 @@ describe('POST /login', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.token).toBe('fake.jwt.token');
-    expect(res.body.user).toEqual({ id: 1, email: 'a@b.com', name: 'Ada' });
+    expect(res.body.user).toEqual({ id: 1, email: 'a@b.com', name: 'Ada', isAdmin: false });
     expect(bcrypt.compare).toHaveBeenCalledWith('plaintext123', 'hashed-value');
+    expect(jwt.sign).toHaveBeenCalledWith(
+      expect.objectContaining({ sub: 1, email: 'a@b.com', isAdmin: false }),
+      expect.any(String),
+      expect.any(Object)
+    );
+  });
+
+  test('bakes isAdmin: true into the JWT for an admin user', async () => {
+    pool.query.mockResolvedValueOnce({
+      rows: [{ id: 2, email: 'boss@b.com', name: 'Boss', password_hash: 'hashed-value', is_admin: true }],
+    });
+    bcrypt.compare.mockResolvedValueOnce(true);
+    jwt.sign.mockReturnValueOnce('fake.admin.jwt.token');
+
+    const res = await request(app)
+      .post('/login')
+      .send({ email: 'boss@b.com', password: 'plaintext123' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.isAdmin).toBe(true);
+    expect(jwt.sign).toHaveBeenCalledWith(
+      expect.objectContaining({ isAdmin: true }),
+      expect.any(String),
+      expect.any(Object)
+    );
   });
 
   test('rejects login with a non-existent email without revealing whether the email exists', async () => {

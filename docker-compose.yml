@@ -41,8 +41,10 @@ services:
     env_file: .env
     environment:
       - PORT=4001
-    ports:
-      - "4001:4001"
+    # No host port published: only reachable via the Gateway or the
+    # internal Docker network (e.g. `docker-compose exec user-service ...`).
+    expose:
+      - "4001"
     depends_on:
       postgres:
         condition: service_healthy
@@ -54,8 +56,8 @@ services:
     env_file: .env
     environment:
       - PORT=4002
-    ports:
-      - "4002:4002"
+    expose:
+      - "4002"
 
   order-service:
     build: ./services/order-service
@@ -64,8 +66,8 @@ services:
     env_file: .env
     environment:
       - PORT=4003
-    ports:
-      - "4003:4003"
+    expose:
+      - "4003"
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,8 +81,8 @@ services:
     env_file: .env
     environment:
       - PORT=4004
-    ports:
-      - "4004:4004"
+    expose:
+      - "4004"
     depends_on:
       postgres:
         condition: service_healthy
@@ -94,8 +96,8 @@ services:
     env_file: .env
     environment:
       - PORT=4005
-    ports:
-      - "4005:4005"
+    expose:
+      - "4005"
     depends_on:
       rabbitmq:
         condition: service_healthy

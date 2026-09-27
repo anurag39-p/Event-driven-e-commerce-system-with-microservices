@@ -53,6 +53,7 @@ async function startPaymentResultConsumer(pool, onMessage) {
   await channel.assertQueue(QUEUE, { durable: true });
   await channel.bindQueue(QUEUE, EXCHANGE, 'payment.succeeded');
   await channel.bindQueue(QUEUE, EXCHANGE, 'payment.failed');
+  await channel.bindQueue(QUEUE, EXCHANGE, 'stock.reservation.failed');
 
   topology = await setupRetryTopology(channel, QUEUE);
 
@@ -67,7 +68,7 @@ async function startPaymentResultConsumer(pool, onMessage) {
   });
 
   channel.consume(QUEUE, reliableHandler);
-  console.log(`[${SERVICE_NAME}] Listening for payment results on queue "${QUEUE}" (retry + DLQ enabled)`);
+  console.log(`[${SERVICE_NAME}] Listening for payment results and stock reservation failures on queue "${QUEUE}" (retry + DLQ enabled)`);
 }
 
 function getChannel() {

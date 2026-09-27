@@ -5,6 +5,12 @@ const { recordEvent, getTimeline, getTimelinesForOrders } = require('./orderTime
 
 const router = express.Router();
 
+// Product Service's own port, reached over the internal Docker network -
+// not through the Gateway. GET /:id is a public, unauthenticated route
+// there (same as the Gateway's rule for GET /products), so no token is
+// needed for this server-to-server call.
+const PRODUCT_SERVICE_URL = process.env.PRODUCT_SERVICE_URL || 'http://product-service:4002';
+
 function resolveUserId(req) {
   if (req.headers['x-user-id']) {
     return parseInt(req.headers['x-user-id'], 10);
@@ -20,13 +26,60 @@ function isValidItems(items) {
   return items.every((item) =>
     item &&
     typeof item.productId === 'string' &&
-    Number.isInteger(item.quantity) && item.quantity > 0 &&
-    typeof item.price === 'number' && item.price >= 0
+    Number.isInteger(item.quantity) && item.quantity > 0
   );
+  // Deliberately not validating (or trusting) a client-supplied `price`
+  // here - see priceOrderItems below.
 }
 
 function calculateTotal(items) {
   return items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+}
+
+// Looks up each item's real, current price directly from Product Service
+// and returns a new item list built from that - never from whatever
+// price the client put in the request body. Without this, anyone who can
+// intercept or hand-craft the request could submit `price: 0.01` for a
+// real product and be charged (and have Payment Service "charge") almost
+// nothing for it.
+//
+// Returns { items } on success, or { error } for a client-fixable problem
+// (bad productId). Throws only for unexpected failures (Product Service
+// unreachable, unexpected response shape) so the route can 502 instead of
+// silently mispricing an order.
+async function priceOrderItems(items) {
+  const priced = [];
+
+  for (const item of items) {
+    let response;
+    try {
+      response = await fetch(`${PRODUCT_SERVICE_URL}/${item.productId}`);
+    } catch (err) {
+      throw new Error(`Could not reach Product Service to price product ${item.productId}: ${err.message}`);
+    }
+
+    if (response.status === 404) {
+      return { error: `Product ${item.productId} does not exist` };
+    }
+    if (!response.ok) {
+      throw new Error(`Product Service returned ${response.status} while pricing product ${item.productId}`);
+    }
+
+    const body = await response.json();
+    const product = body.product;
+    if (!product || typeof product.price !== 'number') {
+      throw new Error(`Product Service returned an unexpected response for product ${item.productId}`);
+    }
+
+    priced.push({
+      productId: item.productId,
+      quantity: item.quantity,
+      price: product.price, // authoritative - not the client's value
+      name: product.name,
+    });
+  }
+
+  return { items: priced };
 }
 
 router.post('/', async (req, res) => {
@@ -38,18 +91,30 @@ router.post('/', async (req, res) => {
   }
   if (!isValidItems(items)) {
     return res.status(400).json({
-      error: 'items must be a non-empty array of { productId: string, quantity: positive integer, price: non-negative number }',
+      error: 'items must be a non-empty array of { productId: string, quantity: positive integer }',
     });
   }
 
-  const total = calculateTotal(items);
+  let pricedItems;
+  try {
+    const result = await priceOrderItems(items);
+    if (result.error) {
+      return res.status(400).json({ error: result.error });
+    }
+    pricedItems = result.items;
+  } catch (err) {
+    console.error('[order-service] Failed to price order items:', err.message);
+    return res.status(502).json({ error: 'Could not verify current product prices, please try again' });
+  }
+
+  const total = calculateTotal(pricedItems);
 
   try {
     const result = await pool.query(
       `INSERT INTO orders (user_id, items, total, status)
        VALUES ($1, $2, $3, 'PENDING')
        RETURNING id, user_id, items, total, status, cancellation_reason, created_at, updated_at`,
-      [userId, JSON.stringify(items), total]
+      [userId, JSON.stringify(pricedItems), total]
     );
 
     const order = result.rows[0];

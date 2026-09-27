@@ -3,14 +3,34 @@ const Product = require('./Product');
 const Reservation = require('./Reservation');
 const { publishEvent } = require('./rabbit');
 
+// Atomically decrements stock only if enough is available. The query
+// condition (stock >= quantity) and the $inc happen as a single Mongo
+// operation, so two concurrent reservations for the same product can't
+// both read "5 in stock" and both succeed in taking the last few units -
+// whichever gets there first wins, and the other sees no matching
+// document and fails cleanly. Returns the updated product, or null if
+// the product doesn't exist or didn't have enough stock.
+async function tryDecrementStock(productId, quantity) {
+  return Product.findOneAndUpdate(
+    { _id: productId, stock: { $gte: quantity } },
+    { $inc: { stock: -quantity } },
+    { new: true }
+  );
+}
+
+async function restoreStock(productId, quantity) {
+  await Product.findOneAndUpdate({ _id: productId }, { $inc: { stock: quantity } });
+}
+
 // Reserves stock for a newly created order. Runs as a side effect of
 // order.created - independent of, and in parallel with, Payment Service
 // processing the same event.
 //
-// Note: stock is never allowed to go below 0 here (clamped), which means
-// in rare cases the "reservation" can under-reserve relative to what was
-// requested. Proper inventory locking (rejecting the order outright on
-// insufficient stock) is a reasonable next step beyond this project's scope.
+// This is all-or-nothing: if any item in the order can't be reserved
+// (product missing, or insufficient stock), everything already reserved
+// for this same order is rolled back and stock.reservation.failed is
+// published so Order Service can cancel the order instead of confirming
+// one it can't fulfil.
 async function reserveStock(order) {
   const { orderId, items } = order;
 
@@ -20,18 +40,34 @@ async function reserveStock(order) {
     return;
   }
 
+  const reservedSoFar = [];
+
+  async function rejectOrder(reason) {
+    for (const { productId, quantity } of reservedSoFar) {
+      await restoreStock(productId, quantity);
+    }
+    await Reservation.create({ orderId, items, status: 'FAILED' });
+    console.error(`[product-service] Stock reservation failed for order ${orderId}: ${reason}`);
+    publishEvent('stock.reservation.failed', { orderId, reason });
+  }
+
   for (const item of items) {
     if (!mongoose.Types.ObjectId.isValid(item.productId)) {
-      console.error(`[product-service] Skipping invalid productId in order ${orderId}: ${item.productId}`);
-      continue;
+      await rejectOrder(`Invalid productId: ${item.productId}`);
+      return;
     }
-    const product = await Product.findById(item.productId);
-    if (!product) {
-      console.error(`[product-service] Product ${item.productId} not found for order ${orderId}`);
-      continue;
+
+    const updated = await tryDecrementStock(item.productId, item.quantity);
+    if (!updated) {
+      const product = await Product.findById(item.productId);
+      const reason = product
+        ? `Insufficient stock for "${product.name}" (requested ${item.quantity}, available ${product.stock})`
+        : `Product ${item.productId} not found`;
+      await rejectOrder(reason);
+      return;
     }
-    product.stock = Math.max(0, product.stock - item.quantity);
-    await product.save();
+
+    reservedSoFar.push({ productId: item.productId, quantity: item.quantity });
   }
 
   await Reservation.create({ orderId, items, status: 'RESERVED' });
@@ -51,10 +87,7 @@ async function releaseStock(payload) {
 
   for (const item of reservation.items) {
     if (!mongoose.Types.ObjectId.isValid(item.productId)) continue;
-    const product = await Product.findById(item.productId);
-    if (!product) continue;
-    product.stock += item.quantity;
-    await product.save();
+    await restoreStock(item.productId, item.quantity);
   }
 
   reservation.status = 'RELEASED';
@@ -63,4 +96,4 @@ async function releaseStock(payload) {
   publishEvent('stock.released', { orderId });
 }
 
-module.exports = { reserveStock, releaseStock };
+module.exports = { reserveStock, releaseStock, tryDecrementStock, restoreStock };

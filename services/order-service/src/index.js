@@ -26,7 +26,7 @@ app.get('/health', (req, res) => {
 
 app.use('/', orderRoutes);
 
-function requireAuth(req, res, next) {
+function requireAdmin(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Missing or malformed Authorization header' });
@@ -34,14 +34,18 @@ function requireAuth(req, res, next) {
 
   const token = authHeader.split(' ')[1];
   try {
-    jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.isAdmin !== true) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    req.user = decoded;
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
 
-app.get('/admin/dlq', requireAuth, async (req, res) => {
+app.get('/admin/dlq', requireAdmin, async (req, res) => {
   try {
     const topology = getTopology();
     if (!topology) {
@@ -54,7 +58,7 @@ app.get('/admin/dlq', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/admin/dlq/replay', requireAuth, async (req, res) => {
+app.post('/admin/dlq/replay', requireAdmin, async (req, res) => {
   try {
     const topology = getTopology();
     if (!topology) {
@@ -76,6 +80,15 @@ async function handlePaymentResult(routingKey, payload) {
     await recordEvent(orderId, 'OrderConfirmed', 'Order Service', true);
   } else if (routingKey === 'payment.failed') {
     await recordEvent(orderId, 'PaymentFailed', 'Payment Service', false, reason);
+    await updateOrderStatus(orderId, 'CANCELLED', reason);
+    await recordEvent(orderId, 'OrderCancelled', 'Order Service', true, reason);
+  } else if (routingKey === 'stock.reservation.failed') {
+    // Product Service couldn't atomically reserve stock for one or more
+    // items (out of stock, or the product no longer exists). Cancel the
+    // order the same way a payment failure would - Payment Service may
+    // still charge the card independently, but there's nothing to ship,
+    // so the order can't be allowed to become CONFIRMED.
+    await recordEvent(orderId, 'StockReservationFailed', 'Product Service', false, reason);
     await updateOrderStatus(orderId, 'CANCELLED', reason);
     await recordEvent(orderId, 'OrderCancelled', 'Order Service', true, reason);
   } else {
@@ -101,4 +114,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, handlePaymentResult, requireAuth };
+module.exports = { app, handlePaymentResult, requireAdmin };

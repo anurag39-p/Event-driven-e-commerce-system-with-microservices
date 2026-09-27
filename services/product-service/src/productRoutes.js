@@ -2,13 +2,16 @@ const express = require('express');
 const mongoose = require('mongoose');
 const Product = require('./Product');
 
-const router = express.Router();
-
 function isValidObjectId(id) {
   return mongoose.Types.ObjectId.isValid(id);
 }
 
-router.post('/', async (req, res) => {
+// Factory so index.js can inject its requireAdmin middleware without a
+// circular require between index.js and productRoutes.js.
+module.exports = function createProductRoutes(requireAdmin) {
+const router = express.Router();
+
+router.post('/', requireAdmin, async (req, res) => {
   const { name, description, price, stock, category, imageUrl } = req.body;
 
   if (!name || typeof price !== 'number' || price < 0) {
@@ -63,7 +66,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-router.patch('/:id/stock', async (req, res) => {
+router.patch('/:id/stock', requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { stock, delta } = req.body;
 
@@ -99,4 +102,5 @@ router.patch('/:id/stock', async (req, res) => {
   }
 });
 
-module.exports = router;
+  return router;
+};
