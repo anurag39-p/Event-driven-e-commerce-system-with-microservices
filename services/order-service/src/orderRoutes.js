@@ -1,7 +1,7 @@
 const express = require('express');
 const pool = require('./db');
-const { publishEvent } = require('./rabbit');
 const { recordEvent, getTimeline, getTimelinesForOrders } = require('./orderTimeline');
+const { writeOutboxEvent } = require('./outbox');
 
 const router = express.Router();
 
@@ -109,32 +109,53 @@ router.post('/', async (req, res) => {
 
   const total = calculateTotal(pricedItems);
 
+  const client = await pool.connect();
+  let order;
   try {
-    const result = await pool.query(
+    await client.query('BEGIN');
+
+    const result = await client.query(
       `INSERT INTO orders (user_id, items, total, status)
        VALUES ($1, $2, $3, 'PENDING')
        RETURNING id, user_id, items, total, status, cancellation_reason, created_at, updated_at`,
       [userId, JSON.stringify(pricedItems), total]
     );
+    order = result.rows[0];
 
-    const order = result.rows[0];
-
-    await recordEvent(order.id, 'OrderCreated', 'Order Service', true);
-
-    publishEvent('order.created', {
-      orderId: order.id,
-      userId: order.user_id,
-      items: order.items,
-      total: order.total,
+    // Same transaction as the INSERT above: either both commit (the order
+    // exists AND an event is guaranteed to eventually reach Payment/Product
+    // Service) or both roll back (nothing happened). No window where the
+    // order exists but the rest of the system never finds out about it.
+    await writeOutboxEvent(client, {
+      eventType: 'order.created',
+      payload: {
+        orderId: order.id,
+        userId: order.user_id,
+        items: order.items,
+        total: order.total,
+      },
     });
 
-    await recordEvent(order.id, 'PaymentInitiated', 'RabbitMQ \u2192 Payment Service', true);
-
-    return res.status(201).json({ order });
+    await client.query('COMMIT');
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('[order-service] Create order error:', err.message);
     return res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
   }
+
+  try {
+    await recordEvent(order.id, 'OrderCreated', 'Order Service', true);
+    await recordEvent(order.id, 'PaymentInitiated', 'Outbox \u2192 RabbitMQ \u2192 Payment Service', true);
+  } catch (err) {
+    // The order itself is safely committed at this point; a failure here
+    // only means the human-facing timeline is momentarily incomplete, not
+    // that the order or its event were lost.
+    console.error('[order-service] Failed to record order-creation timeline events:', err.message);
+  }
+
+  return res.status(201).json({ order });
 });
 
 router.get('/:id', async (req, res) => {

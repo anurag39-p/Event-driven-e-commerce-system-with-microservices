@@ -3,7 +3,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const pool = require('./pgPool');
 const { ensureIdempotencyTable, getDlqStatus, replayDlq } = require('./reliability');
-const { connectRabbit, startResultConsumer, getChannel, getTopology, QUEUE } = require('./rabbit');
+const { connectRabbit, onConnected, startResultConsumer, getChannel, getTopology, QUEUE } = require('./rabbit');
 const { sendOrderConfirmedEmail, sendOrderCancelledEmail } = require('./notify');
 
 const app = express();
@@ -80,8 +80,9 @@ async function handleOrderResult(routingKey, payload) {
 
 async function start() {
   await ensureIdempotencyTable(pool);
+
+  onConnected(() => startResultConsumer(pool, handleOrderResult));
   await connectRabbit();
-  await startResultConsumer(pool, handleOrderResult);
 
   app.listen(PORT, () => {
     console.log(`[${SERVICE_NAME}] listening on port ${PORT}`);

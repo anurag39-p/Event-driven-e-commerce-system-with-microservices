@@ -35,6 +35,28 @@ async function runMigrations() {
     CREATE INDEX IF NOT EXISTS idx_order_events_order_id ON order_events(order_id);
   `;
 
+  // Transactional outbox: an event row is written in the SAME transaction
+  // as the business change it describes (e.g. the order INSERT), so the
+  // two either both commit or both roll back. A separate relay (see
+  // outbox.js) polls unpublished rows and actually sends them to
+  // RabbitMQ - decoupling "did we decide to emit this event" (atomic,
+  // guaranteed) from "did the broker actually receive it" (best-effort,
+  // retried until it succeeds).
+  const createOutboxTable = `
+    CREATE TABLE IF NOT EXISTS outbox_events (
+      id BIGSERIAL PRIMARY KEY,
+      event_type VARCHAR(100) NOT NULL,
+      payload JSONB NOT NULL,
+      message_id TEXT NOT NULL UNIQUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      published_at TIMESTAMPTZ
+    );
+  `;
+
+  const createOutboxUnpublishedIndex = `
+    CREATE INDEX IF NOT EXISTS idx_outbox_unpublished ON outbox_events (id) WHERE published_at IS NULL;
+  `;
+
   let retries = 10;
   while (retries > 0) {
     try {
@@ -42,7 +64,9 @@ async function runMigrations() {
       await pool.query(addCancellationReasonColumn);
       await pool.query(createOrderEventsTable);
       await pool.query(createOrderEventsIndex);
-      console.log('[order-service] Migration check complete: orders table ready');
+      await pool.query(createOutboxTable);
+      await pool.query(createOutboxUnpublishedIndex);
+      console.log('[order-service] Migration check complete: orders + outbox_events tables ready');
       return;
     } catch (err) {
       retries -= 1;

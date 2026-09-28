@@ -80,12 +80,28 @@ export default function Checkout() {
     Date.now() - orderPlacedAt > POLL_TIMEOUT_MS;
   const isPolling = currentStatus === 'PENDING' && !timedOut;
 
-  const displayItems = order ? orderedItems : items;
+  // Once an order exists, prefer the server's response over the client's
+  // pre-checkout cart snapshot for anything price-related. Order Service
+  // now looks up each item's real price itself (see the price-trust fix)
+  // rather than trusting whatever was in the cart, so `orderedItems`
+  // (captured from the cart right before the API call) can legitimately
+  // differ from what was actually charged - e.g. if a price changed
+  // between adding to cart and checking out. Showing the client's number
+  // here would mean showing the customer a total they weren't actually
+  // charged. Product images aren't stored server-side, so those still
+  // come from the cart snapshot, matched up by productId.
+  const serverItems = order?.items;
+  const displayItems = order
+    ? (serverItems || orderedItems).map((item) => ({
+        ...item,
+        imageUrl: orderedItems.find((i) => i.productId === item.productId)?.imageUrl,
+      }))
+    : items;
   const displaySubtotal = order
-    ? orderedItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
+    ? Number(displayOrder?.total ?? order.total)
     : subtotal;
   const displayItemCount = order
-    ? orderedItems.reduce((sum, item) => sum + item.quantity, 0)
+    ? (serverItems || orderedItems).reduce((sum, item) => sum + item.quantity, 0)
     : totalItemCount;
 
   useEffect(() => {

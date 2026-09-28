@@ -25,6 +25,10 @@ function mockFetchJson(status, body) {
   };
 }
 
+function mockTransactionClient() {
+  return { query: jest.fn().mockResolvedValue({ rows: [] }), release: jest.fn() };
+}
+
 // The client only ever needs to say which product and how many - price is
 // looked up server-side from Product Service, never trusted from the client.
 const requestItems = [{ productId: 'abc123', quantity: 2 }];
@@ -32,10 +36,13 @@ const realProduct = { _id: 'abc123', name: 'Widget', price: 20 };
 
 describe('Order creation - POST /', () => {
   let app;
+  let client;
 
   beforeEach(() => {
     jest.clearAllMocks();
     global.fetch = jest.fn().mockResolvedValue(mockFetchJson(200, { product: realProduct }));
+    client = mockTransactionClient();
+    pool.connect.mockResolvedValue(client);
     app = buildApp();
   });
 
@@ -51,7 +58,12 @@ describe('Order creation - POST /', () => {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
-    pool.query.mockResolvedValueOnce({ rows: [fakeOrderRow] });
+    // BEGIN, INSERT INTO orders (returns the row), INSERT INTO outbox_events, COMMIT
+    client.query
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({ rows: [fakeOrderRow] }) // INSERT orders
+      .mockResolvedValueOnce({}) // INSERT outbox_events
+      .mockResolvedValueOnce({}); // COMMIT
 
     // Client tries to submit a fake price of 0.01 - it must be ignored.
     const res = await request(app)
@@ -65,10 +77,43 @@ describe('Order creation - POST /', () => {
     expect(res.body.order.total).toBe('40.00');
 
     // The INSERT must use the server-fetched price (20), not the client's (0.01).
-    expect(pool.query).toHaveBeenCalledWith(
+    expect(client.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO orders'),
       [42, JSON.stringify(pricedItems), 40]
     );
+    // The order and its outbox event were written in the same transaction.
+    expect(client.query).toHaveBeenCalledWith('BEGIN');
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO outbox_events'),
+      expect.any(Array)
+    );
+    expect(client.query).toHaveBeenCalledWith('COMMIT');
+    expect(client.release).toHaveBeenCalled();
+  });
+
+  test('does not publish directly - only writes to the outbox (the relay owns publishing)', async () => {
+    client.query
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: 7, user_id: 42, items: [], total: '40.00', status: 'PENDING' }] })
+      .mockResolvedValueOnce({}) // INSERT outbox_events
+      .mockResolvedValueOnce({}); // COMMIT
+
+    await request(app).post('/').set('x-user-id', '42').send({ items: requestItems });
+
+    expect(publishEvent).not.toHaveBeenCalled();
+  });
+
+  test('rolls back and returns 500 if the outbox insert fails, so no order is left without an event', async () => {
+    client.query
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: 7, user_id: 42, items: [], total: '40.00', status: 'PENDING' }] })
+      .mockRejectedValueOnce(new Error('outbox insert failed')); // INSERT outbox_events
+
+    const res = await request(app).post('/').set('x-user-id', '42').send({ items: requestItems });
+
+    expect(res.status).toBe(500);
+    expect(client.query).toHaveBeenCalledWith('ROLLBACK');
+    expect(client.release).toHaveBeenCalled();
   });
 
   test('rejects the order with 400 if a product does not exist', async () => {
@@ -80,7 +125,7 @@ describe('Order creation - POST /', () => {
       .send({ items: requestItems });
 
     expect(res.status).toBe(400);
-    expect(pool.query).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
   });
 
   test('returns 502 (not a mispriced order) if Product Service is unreachable', async () => {
@@ -92,35 +137,32 @@ describe('Order creation - POST /', () => {
       .send({ items: requestItems });
 
     expect(res.status).toBe(502);
-    expect(pool.query).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
   });
 
-  test('records an OrderCreated timeline event', async () => {
-    pool.query.mockResolvedValueOnce({
-      rows: [{ id: 7, user_id: 42, items: [], total: '40.00', status: 'PENDING' }],
-    });
+  test('records OrderCreated and PaymentInitiated timeline events after commit', async () => {
+    client.query
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: 7, user_id: 42, items: [], total: '40.00', status: 'PENDING' }] })
+      .mockResolvedValueOnce({}) // INSERT outbox_events
+      .mockResolvedValueOnce({}); // COMMIT
 
     await request(app).post('/').set('x-user-id', '42').send({ items: requestItems });
 
     expect(recordEvent).toHaveBeenCalledWith(7, 'OrderCreated', 'Order Service', true);
-  });
-
-  test('publishes order.created and records a PaymentInitiated timeline event', async () => {
-    pool.query.mockResolvedValueOnce({
-      rows: [{ id: 7, user_id: 42, items: [], total: '40.00', status: 'PENDING' }],
-    });
-
-    await request(app).post('/').set('x-user-id', '42').send({ items: requestItems });
-
-    expect(publishEvent).toHaveBeenCalledWith('order.created', expect.objectContaining({ orderId: 7 }));
-    expect(recordEvent).toHaveBeenCalledWith(7, 'PaymentInitiated', 'RabbitMQ \u2192 Payment Service', true);
+    expect(recordEvent).toHaveBeenCalledWith(
+      7,
+      'PaymentInitiated',
+      'Outbox \u2192 RabbitMQ \u2192 Payment Service',
+      true
+    );
   });
 
   test('rejects a request with no resolvable user', async () => {
     const res = await request(app).post('/').send({ items: requestItems });
 
     expect(res.status).toBe(401);
-    expect(pool.query).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
@@ -128,7 +170,7 @@ describe('Order creation - POST /', () => {
     const res = await request(app).post('/').set('x-user-id', '42').send({ items: [] });
 
     expect(res.status).toBe(400);
-    expect(pool.query).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });

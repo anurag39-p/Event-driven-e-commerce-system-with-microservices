@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const { connectMongo } = require('./db');
 const pgPool = require('./pgPool');
 const { ensureIdempotencyTable, getDlqStatus, replayDlq } = require('./reliability');
-const { connectRabbit, startSagaConsumer, getChannel, getTopology, QUEUE } = require('./rabbit');
+const { connectRabbit, onConnected, startSagaConsumer, getChannel, getTopology, QUEUE } = require('./rabbit');
 const { reserveStock, releaseStock } = require('./sagaHandlers');
 const productRoutes = require('./productRoutes');
 
@@ -86,8 +86,9 @@ async function handleSagaEvent(routingKey, payload) {
 async function start() {
   await connectMongo();
   await ensureIdempotencyTable(pgPool);
+
+  onConnected(() => startSagaConsumer(pgPool, handleSagaEvent));
   await connectRabbit();
-  await startSagaConsumer(pgPool, handleSagaEvent);
 
   app.listen(PORT, () => {
     console.log(`[${SERVICE_NAME}] listening on port ${PORT}`);

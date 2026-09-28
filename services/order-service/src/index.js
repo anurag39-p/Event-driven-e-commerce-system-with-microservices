@@ -4,9 +4,10 @@ const jwt = require('jsonwebtoken');
 const pool = require('./db');
 const { runMigrations } = require('./migrate');
 const { ensureIdempotencyTable, getDlqStatus, replayDlq } = require('./reliability');
-const { connectRabbit, startPaymentResultConsumer, getChannel, getTopology, QUEUE } = require('./rabbit');
+const { connectRabbit, onConnected, publishEvent, startPaymentResultConsumer, getChannel, getTopology, QUEUE } = require('./rabbit');
 const { updateOrderStatus } = require('./orderStatus');
 const { recordEvent } = require('./orderTimeline');
+const { startOutboxRelay } = require('./outbox');
 const orderRoutes = require('./orderRoutes');
 
 const app = express();
@@ -99,8 +100,19 @@ async function handlePaymentResult(routingKey, payload) {
 async function start() {
   await runMigrations();
   await ensureIdempotencyTable(pool);
+
+  // Re-runs on every successful connect, including reconnects after a
+  // RabbitMQ drop - a fresh channel has none of the previous channel's
+  // queue bindings or consumer registration.
+  onConnected(() => startPaymentResultConsumer(pool, handlePaymentResult));
+
   await connectRabbit();
-  await startPaymentResultConsumer(pool, handlePaymentResult);
+
+  // The relay itself doesn't need restarting on reconnect - it looks up
+  // the live channel via publishEvent() on every tick rather than holding
+  // its own reference, so it naturally starts succeeding again once the
+  // channel is back.
+  startOutboxRelay(pool, publishEvent);
 
   app.listen(PORT, () => {
     console.log(`[${SERVICE_NAME}] listening on port ${PORT}`);

@@ -5,9 +5,42 @@ const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://admin:admin123@rabbitmq
 const EXCHANGE = 'ecommerce_events';
 const QUEUE = 'order-service.payment-results';
 const SERVICE_NAME = 'order-service';
+const RECONNECT_DELAY_MS = 3000;
 
 let channel = null;
 let topology = null;
+let reconnecting = false;
+let onReconnected = null; // re-runs queue binding + consumer setup after a fresh connection
+
+// Registers a callback to run every time a connection is (re-)established -
+// both the very first time and after any later reconnect. index.js uses
+// this so consumer setup only needs to be written once, not duplicated
+// between initial startup and reconnect handling.
+function onConnected(fn) {
+  onReconnected = fn;
+}
+
+function scheduleReconnect() {
+  if (reconnecting) return;
+  reconnecting = true;
+  console.log(`[${SERVICE_NAME}] Will attempt to reconnect to RabbitMQ in ${RECONNECT_DELAY_MS}ms`);
+  setTimeout(async () => {
+    try {
+      await connectRabbit(); // re-invokes onReconnected itself once connected
+      reconnecting = false;
+    } catch (err) {
+      // connectRabbit()'s own retry loop (10 attempts, ~30s) is meant as a
+      // one-time grace period for initial startup, when depends_on has
+      // already reported "healthy" but the broker may need a moment
+      // longer. For recovering from a drop, that same 30s window isn't
+      // long enough to assume the outage is permanent - keep trying
+      // rather than leaving this service silently disconnected forever.
+      console.error(`[${SERVICE_NAME}] Reconnect attempt exhausted its retries, will try again:`, err.message);
+      reconnecting = false;
+      scheduleReconnect();
+    }
+  }, RECONNECT_DELAY_MS);
+}
 
 async function connectRabbit() {
   let retries = 10;
@@ -17,7 +50,28 @@ async function connectRabbit() {
       channel = await connection.createChannel();
       await channel.assertExchange(EXCHANGE, 'topic', { durable: true });
 
+      // Without these, a dropped connection (RabbitMQ restart, network
+      // blip) leaves `channel` pointing at a dead object forever - every
+      // future publish/consume call fails the same way until this whole
+      // process is manually restarted. This is what happened in testing:
+      // a stale channel kept throwing "Channel closed" indefinitely.
+      connection.on('error', (err) => {
+        console.error(`[${SERVICE_NAME}] RabbitMQ connection error:`, err.message);
+      });
+      connection.on('close', () => {
+        console.error(`[${SERVICE_NAME}] RabbitMQ connection closed - will reconnect`);
+        channel = null;
+        topology = null;
+        scheduleReconnect();
+      });
+
       console.log(`[${SERVICE_NAME}] Connected to RabbitMQ`);
+
+      // Re-run queue binding + consumer setup on every successful connect,
+      // not just the first one - a fresh channel has none of the previous
+      // channel's bindings or consumers.
+      if (onReconnected) await onReconnected();
+
       return channel;
     } catch (err) {
       retries -= 1;
@@ -31,16 +85,21 @@ async function connectRabbit() {
   }
 }
 
-function publishEvent(routingKey, payload) {
+// Throws rather than silently no-op'ing when the channel isn't ready.
+// This matters specifically for the outbox relay (outbox.js): it decides
+// whether to mark a row published based on whether this call throws. A
+// silent no-op here would make the relay wrongly mark an event as
+// published when it never actually reached RabbitMQ - exactly the kind
+// of quiet data loss the outbox pattern exists to prevent.
+function publishEvent(routingKey, payload, options = {}) {
   if (!channel) {
-    console.error(`[${SERVICE_NAME}] Cannot publish - RabbitMQ channel not ready`);
-    return;
+    throw new Error('Cannot publish - RabbitMQ channel not ready');
   }
   channel.publish(
     EXCHANGE,
     routingKey,
     Buffer.from(JSON.stringify(payload)),
-    { persistent: true, contentType: 'application/json', messageId: generateMessageId() }
+    { persistent: true, contentType: 'application/json', messageId: options.messageId || generateMessageId() }
   );
   console.log(`[${SERVICE_NAME}] Published event "${routingKey}"`, payload);
 }
@@ -81,6 +140,7 @@ function getTopology() {
 
 module.exports = {
   connectRabbit,
+  onConnected,
   publishEvent,
   startPaymentResultConsumer,
   getChannel,

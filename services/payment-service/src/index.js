@@ -3,7 +3,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const pool = require('./db');
 const { ensureIdempotencyTable, getDlqStatus, replayDlq } = require('./reliability');
-const { connectRabbit, publishEvent, startOrderCreatedConsumer, getChannel, getTopology, QUEUE } = require('./rabbit');
+const { connectRabbit, onConnected, publishEvent, startOrderCreatedConsumer, getChannel, getTopology, QUEUE } = require('./rabbit');
 const { processPayment } = require('./mockPayment');
 
 const app = express();
@@ -83,8 +83,9 @@ async function handleOrderCreated(routingKey, order) {
 
 async function start() {
   await ensureIdempotencyTable(pool);
+
+  onConnected(() => startOrderCreatedConsumer(pool, handleOrderCreated));
   await connectRabbit();
-  await startOrderCreatedConsumer(pool, handleOrderCreated);
 
   app.listen(PORT, () => {
     console.log(`[${SERVICE_NAME}] listening on port ${PORT}`);

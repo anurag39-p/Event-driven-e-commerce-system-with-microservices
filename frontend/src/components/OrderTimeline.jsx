@@ -12,6 +12,7 @@ const EVENT_LABELS = {
   PaymentInitiated: 'Payment Initiated',
   PaymentSuccessful: 'Payment Successful',
   PaymentFailed: 'Payment Failed',
+  StockReservationFailed: 'Stock Reservation Failed',
   OrderConfirmed: 'Order Confirmed',
   OrderCancelled: 'Order Cancelled',
 };
