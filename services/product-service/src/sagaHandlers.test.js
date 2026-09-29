@@ -87,6 +87,26 @@ describe('reserveStock', () => {
     expect(Reservation.create).toHaveBeenCalledWith(expect.objectContaining({ status: 'FAILED' }));
   });
 
+  test('skips an order that already has a release tombstone (late order.created after payment.failed)', async () => {
+    Reservation.findOne.mockResolvedValue({ orderId: 265, status: 'RELEASED' });
+
+    await reserveStock(order({ orderId: 265 }));
+
+    expect(Product.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(publishEvent).not.toHaveBeenCalled();
+  });
+
+  test('rolls back the stock it took if a tombstone raced in before the reservation was saved', async () => {
+    Reservation.findOne.mockResolvedValue(null);
+    Product.findOneAndUpdate.mockResolvedValue({ _id: PRODUCT_A, stock: 3 });
+    Reservation.create.mockRejectedValueOnce(Object.assign(new Error('dup'), { code: 11000 }));
+
+    await reserveStock(order());
+
+    expect(Product.findOneAndUpdate).toHaveBeenCalledWith({ _id: PRODUCT_A }, { $inc: { stock: 2 } });
+    expect(publishEvent).not.toHaveBeenCalled();
+  });
+
   test('rejects and does not touch stock when a productId is not a valid ObjectId', async () => {
     Reservation.findOne.mockResolvedValue(null);
 
@@ -103,12 +123,31 @@ describe('reserveStock', () => {
 describe('releaseStock', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test('does nothing if there is no RESERVED reservation for the order', async () => {
-    Reservation.findOne.mockResolvedValue(null);
+  test('leaves a RELEASED tombstone when payment.failed arrives before any reservation exists', async () => {
+    Reservation.findOne.mockResolvedValue(null); // no RESERVED row, no row at all
+
+    await releaseStock({ orderId: 265 });
+
+    expect(Product.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(Reservation.create).toHaveBeenCalledWith({ orderId: 265, items: [], status: 'RELEASED' });
+  });
+
+  test('does nothing more if the reservation is already RELEASED or FAILED', async () => {
+    Reservation.findOne
+      .mockResolvedValueOnce(null) // no RESERVED row
+      .mockResolvedValueOnce({ orderId: 1, status: 'RELEASED' }); // but a row exists
 
     await releaseStock({ orderId: 1 });
 
+    expect(Reservation.create).not.toHaveBeenCalled();
     expect(Product.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  test('throws so it is retried if a reservation appears while writing the tombstone', async () => {
+    Reservation.findOne.mockResolvedValue(null);
+    Reservation.create.mockRejectedValueOnce(Object.assign(new Error('dup'), { code: 11000 }));
+
+    await expect(releaseStock({ orderId: 1 })).rejects.toThrow(/appeared during release/);
   });
 
   test('restores stock for every item and marks the reservation RELEASED', async () => {

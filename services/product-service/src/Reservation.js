@@ -9,7 +9,7 @@ const reservationSchema = new mongoose.Schema({
     productId: { type: String, required: true },
     quantity: { type: Number, required: true },
   }],
-  status: { type: String, enum: ['RESERVED', 'RELEASED'], default: 'RESERVED' },
+  status: { type: String, enum: ['RESERVED', 'RELEASED', 'FAILED'], default: 'RESERVED' },
 }, {
   timestamps: true,
 });

@@ -19,6 +19,12 @@ const { updateOrderStatus } = require('./orderStatus');
 const { recordEvent } = require('./orderTimeline');
 const { handlePaymentResult } = require('./index');
 
+// By default the transition is applied, so updateOrderStatus returns the row.
+// Tests for late events override this with null (transition refused).
+beforeEach(() => {
+  updateOrderStatus.mockResolvedValue({ id: 1, status: 'CONFIRMED', cancellation_reason: null });
+});
+
 describe('handlePaymentResult - payment success flow', () => {
   beforeEach(() => jest.clearAllMocks());
 
@@ -99,5 +105,42 @@ describe('handlePaymentResult - stock reservation failure', () => {
   test('records an OrderCancelled timeline event with the reason', async () => {
     await handlePaymentResult('stock.reservation.failed', { orderId: 12, reason });
     expect(recordEvent).toHaveBeenCalledWith(12, 'OrderCancelled', 'Order Service', true, reason);
+  });
+});
+
+describe('handlePaymentResult - late events on an order that is already terminal', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    updateOrderStatus.mockResolvedValue(null); // transition refused: order already CONFIRMED/CANCELLED
+  });
+
+  test('a late payment.failed still records what arrived, but NOT an OrderCancelled outcome', async () => {
+    await handlePaymentResult('payment.failed', { orderId: 20, reason: 'Simulated card decline' });
+
+    expect(updateOrderStatus).toHaveBeenCalledWith(20, 'CANCELLED', 'Simulated card decline');
+    expect(recordEvent).toHaveBeenCalledWith(20, 'PaymentFailed', 'Payment Service', false, 'Simulated card decline');
+    expect(recordEvent).not.toHaveBeenCalledWith(20, 'OrderCancelled', expect.anything(), expect.anything(), expect.anything());
+  });
+
+  test('a late payment.succeeded records PaymentSuccessful but NOT an OrderConfirmed outcome', async () => {
+    await handlePaymentResult('payment.succeeded', { orderId: 21, total: '10.00' });
+
+    expect(recordEvent).toHaveBeenCalledWith(21, 'PaymentSuccessful', 'Payment Service', true);
+    expect(recordEvent).not.toHaveBeenCalledWith(21, 'OrderConfirmed', expect.anything(), expect.anything());
+  });
+
+  test('a late stock.reservation.failed records StockReservationFailed but NOT an OrderCancelled outcome', async () => {
+    await handlePaymentResult('stock.reservation.failed', { orderId: 22, reason: 'Insufficient stock' });
+
+    expect(recordEvent).toHaveBeenCalledWith(22, 'StockReservationFailed', 'Product Service', false, 'Insufficient stock');
+    expect(recordEvent).not.toHaveBeenCalledWith(22, 'OrderCancelled', expect.anything(), expect.anything(), expect.anything());
+  });
+
+  test.each([
+    ['payment.succeeded', { orderId: 1, total: '1.00' }],
+    ['payment.failed', { orderId: 1, reason: 'x' }],
+    ['stock.reservation.failed', { orderId: 1, reason: 'x' }],
+  ])('%s on a terminal order resolves normally - throwing would send a stale event through retries into the DLQ', async (key, payload) => {
+    await expect(handlePaymentResult(key, payload)).resolves.toBeUndefined();
   });
 });

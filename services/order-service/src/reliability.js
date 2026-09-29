@@ -3,6 +3,14 @@
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 5000;
 
+// Each in-flight message holds one DB connection for its idempotency claim
+// (see createReliableHandler), and a handler may need a second connection
+// from the same pool for its own queries. With pg's default pool of 10, a
+// backlog delivered all at once would leave every connection held by a
+// claim while every handler waits for another one - a deadlock. Capping
+// in-flight messages keeps 2 * MAX_IN_FLIGHT comfortably under the pool size.
+const MAX_IN_FLIGHT = parseInt(process.env.CONSUMER_PREFETCH || '4', 10);
+
 function generateMessageId() {
   return uuidv4();
 }
@@ -18,19 +26,22 @@ async function ensureIdempotencyTable(pool) {
   `);
 }
 
-async function isDuplicate(pool, messageId, serviceName) {
-  const result = await pool.query(
-    'SELECT 1 FROM processed_events WHERE message_id = $1 AND service_name = $2',
+// Atomically claims a message for this service. Returns true if this call
+// inserted the row (we own the message and should process it), false if a
+// row already existed (someone processed it, or is processing it right now).
+// A single INSERT ... ON CONFLICT DO NOTHING replaces the old
+// SELECT-then-INSERT pair, which let two concurrent deliveries of the same
+// message both pass the check. It must run inside the caller's transaction
+// (see createReliableHandler) so the claim is rolled back if processing
+// fails - otherwise the retry would look like a duplicate and be dropped.
+async function claimEvent(client, messageId, serviceName) {
+  const result = await client.query(
+    `INSERT INTO processed_events (message_id, service_name)
+     VALUES ($1, $2)
+     ON CONFLICT (message_id, service_name) DO NOTHING`,
     [messageId, serviceName]
   );
-  return result.rows.length > 0;
-}
-
-async function markProcessed(pool, messageId, serviceName) {
-  await pool.query(
-    'INSERT INTO processed_events (message_id, service_name) VALUES ($1, $2) ON CONFLICT (message_id, service_name) DO NOTHING',
-    [messageId, serviceName]
-  );
+  return result.rowCount === 1;
 }
 
 async function setupRetryTopology(channel, queueName) {
@@ -52,15 +63,48 @@ async function setupRetryTopology(channel, queueName) {
 }
 
 function createReliableHandler({ channel, pool, serviceName, queueName, retryQueue, dlqQueue, handler }) {
+  // Applies to the consumer registered right after this handler is created.
+  if (typeof channel.prefetch === 'function') {
+    Promise.resolve(channel.prefetch(MAX_IN_FLIGHT)).catch((err) => {
+      console.error(`[${serviceName}] Failed to set consumer prefetch:`, err.message);
+    });
+  }
+
   return async function (msg) {
     if (!msg) return;
 
     const messageId = msg.properties.messageId || 'unknown';
     const priorRetryCount = (msg.properties.headers && msg.properties.headers['x-retry-count']) || 0;
 
+    // The claim, the handler, and the commit share one transaction:
+    //  - handler fails or the process crashes -> the claim rolls back, so the
+    //    retry / redelivery is processed normally (at-least-once preserved);
+    //  - a concurrent duplicate's INSERT blocks on the unique index until this
+    //    transaction ends, then either skips (we committed) or takes over (we
+    //    rolled back);
+    //  - we only ack after COMMIT, so a crash between the two just redelivers
+    //    a message that then hits the committed claim and is skipped.
+    let client;
+    let discardClient = false;
+
+    // Errors on a CHECKED-OUT client are emitted on the client itself - the
+    // pool's own 'error' handler only covers idle clients. Without this
+    // listener, Postgres dropping or restarting mid-message would surface as
+    // an uncaught exception and crash the whole service. With it, the
+    // in-flight query/COMMIT rejects normally and we fall into the retry path.
+    const onClientError = (err) => {
+      discardClient = true;
+      console.error(`[${serviceName}] DB connection error while handling ${messageId}:`, err.message);
+    };
+
     try {
-      const alreadyProcessed = await isDuplicate(pool, messageId, serviceName);
-      if (alreadyProcessed) {
+      client = await pool.connect();
+      client.on('error', onClientError);
+      await client.query('BEGIN');
+
+      const claimed = await claimEvent(client, messageId, serviceName);
+      if (!claimed) {
+        await client.query('ROLLBACK');
         console.log(`[${serviceName}] Duplicate message ${messageId}, skipping (already processed)`);
         channel.ack(msg);
         return;
@@ -71,9 +115,16 @@ function createReliableHandler({ channel, pool, serviceName, queueName, retryQue
       const payload = JSON.parse(msg.content.toString());
       await handler(routingKey, payload);
 
-      await markProcessed(pool, messageId, serviceName);
+      await client.query('COMMIT');
       channel.ack(msg);
     } catch (err) {
+      if (client) {
+        try {
+          await client.query('ROLLBACK');
+        } catch (rollbackErr) {
+          discardClient = true; // connection is unusable - destroy it instead of pooling it
+        }
+      }
       const nextRetryCount = priorRetryCount + 1;
       console.error(`[${serviceName}] Processing failed for message ${messageId} (attempt ${nextRetryCount}):`, err.message);
 
@@ -103,6 +154,11 @@ function createReliableHandler({ channel, pool, serviceName, queueName, retryQue
       }
 
       channel.ack(msg);
+    } finally {
+      if (client) {
+        client.removeListener('error', onClientError);
+        client.release(discardClient);
+      }
     }
   };
 }
@@ -132,8 +188,7 @@ async function replayDlq(channel, dlqQueue, queueName, limit = 50) {
 module.exports = {
   generateMessageId,
   ensureIdempotencyTable,
-  isDuplicate,
-  markProcessed,
+  claimEvent,
   setupRetryTopology,
   createReliableHandler,
   getDlqStatus,

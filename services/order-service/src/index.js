@@ -75,23 +75,33 @@ app.post('/admin/dlq/replay', requireAdmin, async (req, res) => {
 async function handlePaymentResult(routingKey, payload) {
   const { orderId, reason } = payload;
 
+  // Each branch always records the event that ARRIVED (it happened, and is
+  // useful evidence even when it arrives too late to matter), but only records
+  // the OUTCOME event (OrderConfirmed / OrderCancelled) if the status change
+  // was actually applied. updateOrderStatus returns null when the order was
+  // already terminal - claiming "Order Confirmed" on the timeline for an
+  // order that stayed CANCELLED would be a lie.
   if (routingKey === 'payment.succeeded') {
     await recordEvent(orderId, 'PaymentSuccessful', 'Payment Service', true);
-    await updateOrderStatus(orderId, 'CONFIRMED');
-    await recordEvent(orderId, 'OrderConfirmed', 'Order Service', true);
+    const updated = await updateOrderStatus(orderId, 'CONFIRMED');
+    if (updated) {
+      await recordEvent(orderId, 'OrderConfirmed', 'Order Service', true);
+    }
   } else if (routingKey === 'payment.failed') {
     await recordEvent(orderId, 'PaymentFailed', 'Payment Service', false, reason);
-    await updateOrderStatus(orderId, 'CANCELLED', reason);
-    await recordEvent(orderId, 'OrderCancelled', 'Order Service', true, reason);
+    const updated = await updateOrderStatus(orderId, 'CANCELLED', reason);
+    if (updated) {
+      await recordEvent(orderId, 'OrderCancelled', 'Order Service', true, reason);
+    }
   } else if (routingKey === 'stock.reservation.failed') {
     // Product Service couldn't atomically reserve stock for one or more
     // items (out of stock, or the product no longer exists). Cancel the
-    // order the same way a payment failure would - Payment Service may
-    // still charge the card independently, but there's nothing to ship,
-    // so the order can't be allowed to become CONFIRMED.
+    // order the same way a payment failure would - if it is still PENDING.
     await recordEvent(orderId, 'StockReservationFailed', 'Product Service', false, reason);
-    await updateOrderStatus(orderId, 'CANCELLED', reason);
-    await recordEvent(orderId, 'OrderCancelled', 'Order Service', true, reason);
+    const updated = await updateOrderStatus(orderId, 'CANCELLED', reason);
+    if (updated) {
+      await recordEvent(orderId, 'OrderCancelled', 'Order Service', true, reason);
+    }
   } else {
     throw new Error(`Unrecognized routing key: ${routingKey}`);
   }

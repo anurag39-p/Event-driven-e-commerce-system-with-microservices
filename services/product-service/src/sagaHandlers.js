@@ -70,7 +70,21 @@ async function reserveStock(order) {
     reservedSoFar.push({ productId: item.productId, quantity: item.quantity });
   }
 
-  await Reservation.create({ orderId, items, status: 'RESERVED' });
+  try {
+    await Reservation.create({ orderId, items, status: 'RESERVED' });
+  } catch (err) {
+    // orderId is unique. If a release tombstone (see releaseStock) was
+    // written for this order between our initial check and now, the order
+    // was already cancelled - give back what we just took and stop.
+    if (err.code === 11000) {
+      for (const { productId, quantity } of reservedSoFar) {
+        await restoreStock(productId, quantity);
+      }
+      console.log(`[product-service] Order ${orderId} was released while reserving - rolled back`);
+      return;
+    }
+    throw err;
+  }
   console.log(`[product-service] Reserved stock for order ${orderId}`);
   publishEvent('stock.reserved', { orderId });
 }
@@ -81,7 +95,29 @@ async function releaseStock(payload) {
 
   const reservation = await Reservation.findOne({ orderId, status: 'RESERVED' });
   if (!reservation) {
-    console.log(`[product-service] No active reservation found for order ${orderId}, nothing to release`);
+    const existing = await Reservation.findOne({ orderId });
+    if (existing) {
+      console.log(`[product-service] Order ${orderId} reservation already ${existing.status}, nothing to release`);
+      return;
+    }
+
+    // payment.failed can be processed BEFORE order.created for the same
+    // order (e.g. order.created was retried after a failure). Without a
+    // marker, the late reserveStock would then reserve stock for an order
+    // that is already cancelled, and nothing would ever release it. The
+    // unique orderId index makes this marker double as the guard:
+    // reserveStock skips any order that already has a reservation row.
+    try {
+      await Reservation.create({ orderId, items: [], status: 'RELEASED' });
+    } catch (err) {
+      if (err.code === 11000) {
+        // A reservation appeared while we were checking - throw so the
+        // retry logic re-runs this and releases the real reservation.
+        throw new Error(`Reservation for order ${orderId} appeared during release, retrying`);
+      }
+      throw err;
+    }
+    console.log(`[product-service] payment.failed for order ${orderId} arrived before its reservation - marked released so it won't be reserved`);
     return;
   }
 

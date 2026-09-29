@@ -1,12 +1,24 @@
-const { isDuplicate, markProcessed, setupRetryTopology, createReliableHandler, getDlqStatus, replayDlq, generateMessageId } = require('./reliability');
+const { claimEvent, setupRetryTopology, createReliableHandler, getDlqStatus, replayDlq, generateMessageId } = require('./reliability');
 
-function buildPool() {
-  return { query: jest.fn() };
+// The reliable handler claims each message inside a transaction on a client
+// checked out of the pool. `claim: false` simulates the INSERT ... ON CONFLICT
+// DO NOTHING inserting nothing (the message was already claimed).
+function buildPool({ claim = true } = {}) {
+  const client = {
+    query: jest.fn(async (sql) => (/INSERT INTO processed_events/.test(sql) ? { rowCount: claim ? 1 : 0 } : {})),
+    on: jest.fn(),
+    removeListener: jest.fn(),
+    release: jest.fn(),
+  };
+  return { connect: jest.fn().mockResolvedValue(client), client };
 }
+
+const sqlCalls = (client) => client.query.mock.calls.map(([sql]) => sql);
 
 function buildChannel() {
   return {
     assertQueue: jest.fn().mockResolvedValue(undefined),
+    prefetch: jest.fn().mockResolvedValue(undefined),
     ack: jest.fn(),
     nack: jest.fn(),
     sendToQueue: jest.fn(),
@@ -33,49 +45,28 @@ describe('generateMessageId', () => {
   });
 });
 
-describe('isDuplicate', () => {
-  test('returns true when a matching row already exists', async () => {
-    const pool = buildPool();
-    pool.query.mockResolvedValueOnce({ rows: [{ message_id: 'm1' }] });
-
-    const result = await isDuplicate(pool, 'm1', 'order-service');
-
-    expect(result).toBe(true);
+describe('claimEvent', () => {
+  test('returns true when the insert added a row (we own the message)', async () => {
+    const client = { query: jest.fn().mockResolvedValueOnce({ rowCount: 1 }) };
+    expect(await claimEvent(client, 'm1', 'order-service')).toBe(true);
   });
 
-  test('returns false when no matching row exists', async () => {
-    const pool = buildPool();
-    pool.query.mockResolvedValueOnce({ rows: [] });
-
-    const result = await isDuplicate(pool, 'm1', 'order-service');
-
-    expect(result).toBe(false);
+  test('returns false when ON CONFLICT DO NOTHING inserted nothing (already claimed)', async () => {
+    const client = { query: jest.fn().mockResolvedValueOnce({ rowCount: 0 }) };
+    expect(await claimEvent(client, 'm1', 'order-service')).toBe(false);
   });
 
-  test('scopes the check by BOTH message_id and service_name', async () => {
-    const pool = buildPool();
-    pool.query.mockResolvedValueOnce({ rows: [] });
+  test('is a single atomic INSERT ... ON CONFLICT (message_id, service_name) DO NOTHING, scoped by both keys', async () => {
+    const client = { query: jest.fn().mockResolvedValueOnce({ rowCount: 1 }) };
 
-    await isDuplicate(pool, 'm1', 'order-service');
+    await claimEvent(client, 'm1', 'order-service');
 
-    expect(pool.query).toHaveBeenCalledWith(
-      expect.stringContaining('service_name'),
-      ['m1', 'order-service']
-    );
-  });
-});
-
-describe('markProcessed', () => {
-  test('inserts with ON CONFLICT on the composite (message_id, service_name) key', async () => {
-    const pool = buildPool();
-    pool.query.mockResolvedValueOnce({});
-
-    await markProcessed(pool, 'm1', 'order-service');
-
-    expect(pool.query).toHaveBeenCalledWith(
-      expect.stringContaining('ON CONFLICT (message_id, service_name)'),
-      ['m1', 'order-service']
-    );
+    expect(client.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = client.query.mock.calls[0];
+    expect(sql).toMatch(/INSERT INTO processed_events/);
+    expect(sql).toMatch(/ON CONFLICT \(message_id, service_name\) DO NOTHING/);
+    expect(sql).not.toMatch(/SELECT/i);
+    expect(params).toEqual(['m1', 'order-service']);
   });
 });
 
@@ -111,6 +102,12 @@ describe('createReliableHandler', () => {
     return createReliableHandler({ channel, pool, serviceName, queueName, retryQueue, dlqQueue, handler });
   }
 
+  test('caps in-flight messages via channel.prefetch so claims cannot exhaust the connection pool', () => {
+    const channel = buildChannel();
+    buildHandlerDeps({ pool: buildPool(), channel, handler: jest.fn() });
+    expect(channel.prefetch).toHaveBeenCalledWith(4);
+  });
+
   test('does nothing when given a null message', async () => {
     const pool = buildPool();
     const channel = buildChannel();
@@ -120,12 +117,12 @@ describe('createReliableHandler', () => {
     await reliableHandler(null);
 
     expect(handler).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
     expect(channel.ack).not.toHaveBeenCalled();
   });
 
-  test('duplicate messages are acked without calling the handler or marking processed again', async () => {
-    const pool = buildPool();
-    pool.query.mockResolvedValueOnce({ rows: [{ message_id: 'm1' }] });
+  test('duplicate messages are acked without calling the handler, and the connection is returned', async () => {
+    const pool = buildPool({ claim: false });
     const channel = buildChannel();
     const handler = jest.fn();
     const reliableHandler = buildHandlerDeps({ pool, channel, handler });
@@ -135,13 +132,12 @@ describe('createReliableHandler', () => {
 
     expect(handler).not.toHaveBeenCalled();
     expect(channel.ack).toHaveBeenCalledWith(msg);
-    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(sqlCalls(pool.client)).toEqual(['BEGIN', expect.stringContaining('INSERT INTO processed_events'), 'ROLLBACK']);
+    expect(pool.client.release).toHaveBeenCalledWith(false);
   });
 
-  test('happy path: calls the handler with the routing key and parsed payload, marks processed, then acks', async () => {
+  test('happy path: claims, runs the handler with routing key + parsed payload, COMMITs, and only then acks', async () => {
     const pool = buildPool();
-    pool.query.mockResolvedValueOnce({ rows: [] });
-    pool.query.mockResolvedValueOnce({});
     const channel = buildChannel();
     const handler = jest.fn().mockResolvedValue(undefined);
     const reliableHandler = buildHandlerDeps({ pool, channel, handler });
@@ -150,14 +146,29 @@ describe('createReliableHandler', () => {
     await reliableHandler(msg);
 
     expect(handler).toHaveBeenCalledWith('order.created', { orderId: 5 });
-    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(sqlCalls(pool.client)).toEqual(['BEGIN', expect.stringContaining('INSERT INTO processed_events'), 'COMMIT']);
+
+    const commitOrder = pool.client.query.mock.invocationCallOrder[2];
+    const ackOrder = channel.ack.mock.invocationCallOrder[0];
+    expect(commitOrder).toBeLessThan(ackOrder); // a crash between the two only causes a harmless redelivery
     expect(channel.ack).toHaveBeenCalledWith(msg);
+    expect(pool.client.release).toHaveBeenCalledWith(false);
+  });
+
+  test('the handler only runs after the claim succeeds (claim happens first)', async () => {
+    const pool = buildPool();
+    const channel = buildChannel();
+    const handler = jest.fn().mockResolvedValue(undefined);
+    const reliableHandler = buildHandlerDeps({ pool, channel, handler });
+
+    await reliableHandler(buildMessage());
+
+    const claimOrder = pool.client.query.mock.invocationCallOrder[1];
+    expect(claimOrder).toBeLessThan(handler.mock.invocationCallOrder[0]);
   });
 
   test('uses the preserved x-original-routing-key header on a redelivered message, not the delivery routing key', async () => {
     const pool = buildPool();
-    pool.query.mockResolvedValueOnce({ rows: [] });
-    pool.query.mockResolvedValueOnce({});
     const channel = buildChannel();
     const handler = jest.fn().mockResolvedValue(undefined);
     const reliableHandler = buildHandlerDeps({ pool, channel, handler });
@@ -175,8 +186,6 @@ describe('createReliableHandler', () => {
 
   test('falls back to messageId "unknown" if the message has none', async () => {
     const pool = buildPool();
-    pool.query.mockResolvedValueOnce({ rows: [] });
-    pool.query.mockResolvedValueOnce({});
     const channel = buildChannel();
     const handler = jest.fn().mockResolvedValue(undefined);
     const reliableHandler = buildHandlerDeps({ pool, channel, handler });
@@ -185,12 +194,24 @@ describe('createReliableHandler', () => {
 
     await reliableHandler(msg);
 
-    expect(pool.query).toHaveBeenNthCalledWith(1, expect.any(String), ['unknown', serviceName]);
+    expect(pool.client.query).toHaveBeenNthCalledWith(2, expect.any(String), ['unknown', serviceName]);
+  });
+
+  test('on handler failure the claim is ROLLED BACK (never committed), so the retry is not mistaken for a duplicate', async () => {
+    const pool = buildPool();
+    const channel = buildChannel();
+    const handler = jest.fn().mockRejectedValue(new Error('Simulated payment gateway timeout'));
+    const reliableHandler = buildHandlerDeps({ pool, channel, handler });
+
+    await reliableHandler(buildMessage({ messageId: 'm4' }));
+
+    expect(sqlCalls(pool.client)).toContain('ROLLBACK');
+    expect(sqlCalls(pool.client)).not.toContain('COMMIT');
+    expect(pool.client.release).toHaveBeenCalledWith(false);
   });
 
   test('on handler failure below the retry limit, requeues to the retry queue with an incremented retry count and preserved original routing key', async () => {
     const pool = buildPool();
-    pool.query.mockResolvedValueOnce({ rows: [] });
     const channel = buildChannel();
     const handler = jest.fn().mockRejectedValue(new Error('Simulated payment gateway timeout'));
     const reliableHandler = buildHandlerDeps({ pool, channel, handler });
@@ -215,7 +236,6 @@ describe('createReliableHandler', () => {
 
   test('on the final allowed attempt, handler failure sends to the DLQ instead of retrying again', async () => {
     const pool = buildPool();
-    pool.query.mockResolvedValueOnce({ rows: [] });
     const channel = buildChannel();
     const handler = jest.fn().mockRejectedValue(new Error('Simulated payment gateway timeout'));
     const reliableHandler = buildHandlerDeps({ pool, channel, handler });
@@ -236,6 +256,63 @@ describe('createReliableHandler', () => {
     );
     expect(channel.sendToQueue).not.toHaveBeenCalledWith(retryQueue, expect.anything(), expect.anything());
     expect(channel.ack).toHaveBeenCalledWith(msg);
+  });
+
+  test('a failed COMMIT is treated as a processing failure and retried, not acked as success', async () => {
+    const pool = buildPool();
+    pool.client.query.mockImplementation(async (sql) => {
+      if (/INSERT INTO processed_events/.test(sql)) return { rowCount: 1 };
+      if (sql === 'COMMIT') throw new Error('connection lost');
+      return {};
+    });
+    const channel = buildChannel();
+    const reliableHandler = buildHandlerDeps({ pool, channel, handler: jest.fn().mockResolvedValue(undefined) });
+    const msg = buildMessage({ messageId: 'm6' });
+
+    await reliableHandler(msg);
+
+    expect(channel.sendToQueue).toHaveBeenCalledWith(retryQueue, msg.content, expect.anything());
+  });
+
+  test('if ROLLBACK itself fails, the broken connection is destroyed rather than returned to the pool', async () => {
+    const pool = buildPool();
+    pool.client.query.mockImplementation(async (sql) => {
+      if (/INSERT INTO processed_events/.test(sql)) return { rowCount: 1 };
+      if (sql === 'ROLLBACK') throw new Error('connection terminated');
+      return {};
+    });
+    const channel = buildChannel();
+    const reliableHandler = buildHandlerDeps({ pool, channel, handler: jest.fn().mockRejectedValue(new Error('boom')) });
+
+    await reliableHandler(buildMessage());
+
+    expect(pool.client.release).toHaveBeenCalledWith(true);
+  });
+
+  test('listens for errors on the checked-out client (a dropped DB connection must not crash the process) and cleans up', async () => {
+    const pool = buildPool();
+    const channel = buildChannel();
+    const reliableHandler = buildHandlerDeps({ pool, channel, handler: jest.fn().mockResolvedValue(undefined) });
+
+    await reliableHandler(buildMessage());
+
+    expect(pool.client.on).toHaveBeenCalledWith('error', expect.any(Function));
+    const listener = pool.client.on.mock.calls[0][1];
+    expect(pool.client.removeListener).toHaveBeenCalledWith('error', listener);
+  });
+
+  test('a client error event marks the connection for destruction instead of throwing', async () => {
+    const pool = buildPool();
+    const channel = buildChannel();
+    const handler = jest.fn(async () => {
+      const listener = pool.client.on.mock.calls[0][1];
+      expect(() => listener(new Error('terminating connection due to administrator command'))).not.toThrow();
+    });
+    const reliableHandler = buildHandlerDeps({ pool, channel, handler });
+
+    await reliableHandler(buildMessage());
+
+    expect(pool.client.release).toHaveBeenCalledWith(true);
   });
 });
 
