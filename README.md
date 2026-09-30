@@ -9,9 +9,8 @@
 ![Jest](https://img.shields.io/badge/Tested%20with-Jest-C21325?logo=jest&logoColor=white)
 ![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
 
-A distributed, event-driven e-commerce platform: 6 independent microservices communicating asynchronously over RabbitMQ, coordinating order fulfillment through a saga pattern, backed by production-grade reliability engineering — transactional outbox, atomic idempotency, automatic connection recovery, retry with backoff, and dead-letter queues.
+A distributed, event-driven e-commerce platform consisting of independently deployable services with service-owned data where persistence is required. Services communicate through the API Gateway and asynchronous events over RabbitMQ, coordinating order fulfillment through a Saga pattern. The system incorporates reliability patterns including Transactional Outbox, atomic idempotency, automatic connection recovery, retry with backoff, and dead-letter queues.
 
-This isn't a tutorial clone. Every pattern below was hardened against a real failure mode I found by deliberately breaking the system — killing RabbitMQ mid-traffic, terminating live database connections, firing concurrent conflicting events at the same order — and fixing what broke, including bugs inside my own fixes. That process, and what it turned up, is documented in detail below because it's the part of this project I'm proudest of.
 
 ## Skills Demonstrated
 

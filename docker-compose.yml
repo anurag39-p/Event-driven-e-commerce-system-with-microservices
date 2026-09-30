@@ -18,6 +18,20 @@ services:
       timeout: 5s
       retries: 5
 
+  mongodb:
+    image: mongo:8
+    container_name: mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     container_name: rabbitmq
@@ -58,6 +72,9 @@ services:
       - PORT=4002
     expose:
       - "4002"
+    depends_on:
+      mongodb:
+        condition: service_healthy
 
   order-service:
     build: ./services/order-service
@@ -136,3 +153,4 @@ services:
 
 volumes:
   postgres_data:
+  mongo_data:

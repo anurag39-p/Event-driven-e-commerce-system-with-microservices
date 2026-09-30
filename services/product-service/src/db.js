@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://host.docker.internal:27017/ecommerce_products';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://mongodb:27017/ecommerce_products';
 
 async function connectMongo() {
   let retries = 10;
