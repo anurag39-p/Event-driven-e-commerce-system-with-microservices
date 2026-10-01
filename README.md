@@ -119,8 +119,7 @@ The most valuable part of building this wasn't writing the reliability patterns 
 ## Getting Started
 
 ### Prerequisites
-- Docker & Docker Compose
-- MongoDB running locally (Product Service connects to it via `host.docker.internal`)
+- Docker & Docker Compose — that's it. MongoDB, PostgreSQL, and RabbitMQ all run as Docker Compose services with persistent volumes; nothing needs to be installed on the host.
 
 ### Setup
 
